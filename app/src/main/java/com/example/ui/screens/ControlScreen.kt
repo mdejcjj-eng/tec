@@ -109,7 +109,7 @@ fun ControlScreen(
     activeSession: RemoteSession?,
     recentCommands: List<RemoteCommand>,
     isBusy: Boolean,
-    onClaimCode: (String) -> Unit,
+    onClaimCode: (String, () -> Unit) -> Unit,
     onConnectDevice: (DeviceEntity) -> Unit,
     onSendCommand: (CommandType, Double, Double, Double, Double) -> Unit,
     onEndSession: (String) -> Unit,
@@ -149,6 +149,8 @@ fun ControlScreen(
                             onEndSession(activeSession.id)
                         }
                     )
+                    val hostDevice = (devicesState as? UiState.Success)?.data
+                        ?.firstOrNull { it.id == activeSession.hostDeviceId }
                     Box(
                         modifier = Modifier
                             .weight(1f)
@@ -157,6 +159,7 @@ fun ControlScreen(
                     ) {
                         RemoteMirrorCanvas(
                             session = activeSession,
+                            hostScreenShareActive = hostDevice?.screenShareActive ?: true,
                             touchControlEnabled = touchControlEnabled,
                             onSendCommand = onSendCommand,
                             modifier = Modifier.fillMaxSize()
@@ -181,6 +184,8 @@ fun ControlScreen(
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
         if (activeSession != null && activeSession.status != SessionStatus.ENDED.name) {
+            val hostDevice = (devicesState as? UiState.Success)?.data
+                ?.firstOrNull { it.id == activeSession.hostDeviceId }
             item(key = "active_viewer") {
                 Surface(
                     color = MaterialTheme.colorScheme.surface,
@@ -204,6 +209,7 @@ fun ControlScreen(
 
                         RemoteMirrorCanvas(
                             session = activeSession,
+                            hostScreenShareActive = hostDevice?.screenShareActive ?: true,
                             touchControlEnabled = touchControlEnabled,
                             onSendCommand = onSendCommand,
                             modifier = Modifier
@@ -279,8 +285,7 @@ fun ControlScreen(
                         )
                         Button(
                             onClick = {
-                                onClaimCode(pairingInput)
-                                pairingInput = ""
+                                onClaimCode(pairingInput) { pairingInput = "" }
                             },
                             enabled = pairingInput.length == 6 && !isBusy,
                             modifier = Modifier
@@ -435,6 +440,7 @@ private fun SessionHeaderBar(
 @Composable
 private fun RemoteMirrorCanvas(
     session: RemoteSession,
+    hostScreenShareActive: Boolean,
     touchControlEnabled: Boolean,
     onSendCommand: (CommandType, Double, Double, Double, Double) -> Unit,
     modifier: Modifier = Modifier
@@ -457,8 +463,11 @@ private fun RemoteMirrorCanvas(
         }
     }
 
-    val aspect = remember(session.frameWidth, session.frameHeight) {
-        if (session.frameWidth > 0 && session.frameHeight > 0) {
+    val liveBitmap = frameBitmap?.takeIf { !it.isRecycled && it.width > 0 && it.height > 0 }
+    val aspect = remember(liveBitmap, session.frameWidth, session.frameHeight) {
+        if (liveBitmap != null) {
+            (liveBitmap.width.toFloat() / liveBitmap.height.toFloat()).coerceIn(0.35f, 1.8f)
+        } else if (session.frameWidth > 0 && session.frameHeight > 0) {
             (session.frameWidth.toFloat() / session.frameHeight.toFloat()).coerceIn(0.35f, 1.8f)
         } else {
             9f / 19.5f
@@ -472,7 +481,7 @@ private fun RemoteMirrorCanvas(
             .border(1.dp, OutlineSubtle, RoundedCornerShape(18.dp)),
         contentAlignment = Alignment.Center
     ) {
-        if (frameBitmap != null) {
+        if (liveBitmap != null) {
             Box(
                 modifier = Modifier
                     .aspectRatio(aspect, matchHeightConstraintsFirst = true)
@@ -528,7 +537,7 @@ private fun RemoteMirrorCanvas(
                     }
             ) {
                 Image(
-                    bitmap = frameBitmap!!.asImageBitmap(),
+                    bitmap = liveBitmap.asImageBitmap(),
                     contentDescription = "Live mirrored screen of ${session.hostDeviceName}",
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.FillBounds
@@ -575,17 +584,26 @@ private fun RemoteMirrorCanvas(
             ) {
                 CircularProgressIndicator(color = CyanPulse)
                 Text(
-                    text = "Waiting for live frames from ${session.hostDeviceName}...",
+                    text = when {
+                        session.status == SessionStatus.REQUESTED.name ->
+                            "Waiting for ${session.hostDeviceName} to tap Allow on Share Host..."
+                        !hostScreenShareActive ->
+                            "${session.hostDeviceName}'s screen broadcast is currently stopped. Open Share Host on ${session.hostDeviceName} and tap Arm & Start Screen Sharing."
+                        else ->
+                            "Waiting for live frames from ${session.hostDeviceName}..."
+                    },
                     style = MaterialTheme.typography.bodyMedium,
                     color = MaterialTheme.colorScheme.onSurfaceVariant
                 )
-                FilledTonalButton(
-                    onClick = { onSendCommand(CommandType.WAKE_STREAM, 0.5, 0.5, 0.5, 0.5) },
-                    modifier = Modifier.testTag("wake_stream_button")
-                ) {
-                    Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(Modifier.width(6.dp))
-                    Text("Request Live Frame")
+                if (session.status == SessionStatus.ACTIVE.name) {
+                    FilledTonalButton(
+                        onClick = { onSendCommand(CommandType.WAKE_STREAM, 0.5, 0.5, 0.5, 0.5) },
+                        modifier = Modifier.testTag("wake_stream_button")
+                    ) {
+                        Icon(Icons.Rounded.Refresh, contentDescription = null, modifier = Modifier.size(18.dp))
+                        Spacer(Modifier.width(6.dp))
+                        Text("Request Live Frame")
+                    }
                 }
             }
         }
@@ -844,7 +862,7 @@ private fun EmptyDevicesCard() {
                 style = MaterialTheme.typography.titleMedium
             )
             Text(
-                text = "Install LinkMirror on Phone 2 and sign in with the same Google account, or enter Phone 2's 6-digit pairing code above.",
+                text = "Install Screen Control on Phone 2 and sign in with the same Google account, or enter Phone 2's 6-digit pairing code above.",
                 style = MaterialTheme.typography.bodyMedium,
                 color = MaterialTheme.colorScheme.onSurfaceVariant
             )

@@ -103,7 +103,8 @@ enum class LinkMirrorTab(
 @Composable
 fun LinkMirrorApp(
     viewModel: LinkMirrorViewModel,
-    userEmail: String
+    userEmail: String,
+    onLockAppNow: () -> Unit
 ) {
     val context = LocalContext.current
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -114,6 +115,7 @@ fun LinkMirrorApp(
     var currentTab by remember { mutableStateOf(LinkMirrorTab.CONTROL) }
 
     val localConfig by viewModel.localConfig.collectAsStateWithLifecycle()
+    val appLockConfig by viewModel.appLockConfig.collectAsStateWithLifecycle()
     val devicesState by viewModel.trustedDevices.collectAsStateWithLifecycle()
     val sessionsState by viewModel.sessions.collectAsStateWithLifecycle()
     val activeSession by viewModel.activeSession.collectAsStateWithLifecycle()
@@ -154,8 +156,22 @@ fun LinkMirrorApp(
     }
 
     val launchScreenCapture: () -> Unit = {
-        val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+        try {
+            val mgr = context.getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            if (mgr == null) {
+                scope.launch {
+                    snackbarHostState.showSnackbar("Screen capture is not supported on this device")
+                }
+            } else {
+                mediaProjectionLauncher.launch(mgr.createScreenCaptureIntent())
+            }
+        } catch (e: Exception) {
+            scope.launch {
+                snackbarHostState.showSnackbar(
+                    e.localizedMessage ?: "Unable to open screen capture prompt"
+                )
+            }
+        }
     }
 
     val notificationPermissionLauncher = rememberLauncherForActivityResult(
@@ -169,7 +185,11 @@ fun LinkMirrorApp(
             ContextCompat.checkSelfPermission(context, Manifest.permission.POST_NOTIFICATIONS) !=
             PackageManager.PERMISSION_GRANTED
         ) {
-            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            try {
+                notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+            } catch (_: Exception) {
+                launchScreenCapture()
+            }
         } else {
             launchScreenCapture()
         }
@@ -294,7 +314,9 @@ fun LinkMirrorApp(
                                 activeSession = activeSession,
                                 recentCommands = recentCommands,
                                 isBusy = isBusy,
-                                onClaimCode = { viewModel.claimPairingCode(it) },
+                                onClaimCode = { code, onSuccess ->
+                                    viewModel.claimPairingCode(code, onSuccess)
+                                },
                                 onConnectDevice = { viewModel.connectToHostDevice(it) },
                                 onSendCommand = { type, x, y, ex, ey ->
                                     viewModel.sendRemoteCommand(type, x, y, ex, ey)
@@ -315,6 +337,7 @@ fun LinkMirrorApp(
                                 onPublishPairingCode = { viewModel.publishCurrentPairingCode() },
                                 onRotatePairingCode = { viewModel.generateAndPublishPairingCode() },
                                 onApprovePairing = { viewModel.approveClaimedPairing(it) },
+                                onDismissPairing = { viewModel.dismissClaimedPairing(it) },
                                 onApproveSession = { viewModel.approveOrResumeSession(it) },
                                 onEndSession = { viewModel.endSession(it) }
                             )
@@ -325,6 +348,7 @@ fun LinkMirrorApp(
                                 onSharePhotoBase64 = { title, b64 ->
                                     viewModel.sharePhotoBase64(title, b64)
                                 },
+                                onPhotoError = { msg -> viewModel.notifyMessage(msg) },
                                 onCaptureRemoteSnapshot = {
                                     viewModel.sendRemoteCommand(CommandType.CAPTURE_SNAPSHOT)
                                 }
@@ -333,8 +357,16 @@ fun LinkMirrorApp(
                                 userEmail = userEmail,
                                 currentUserId = viewModel.currentUserId,
                                 localConfig = localConfig,
+                                appLockConfig = appLockConfig,
                                 devicesState = devicesState,
                                 sessionsState = sessionsState,
+                                onSaveAppPin = { viewModel.saveAppPin(it) },
+                                onVerifyAppPin = { viewModel.verifyAppPin(it) },
+                                onDisableAppLock = { viewModel.disableAppLock(it) },
+                                onUpdateAppLockOptions = { autoBg, allowDevice, shield ->
+                                    viewModel.updateAppLockOptions(autoBg, allowDevice, shield)
+                                },
+                                onLockAppNow = onLockAppNow,
                                 onUpdateDeviceName = { viewModel.updateDeviceName(it) },
                                 onChangeRoleMode = { viewModel.setRoleMode(it) },
                                 onRevokeTrustedUid = { viewModel.revokeTrustedController(it) },

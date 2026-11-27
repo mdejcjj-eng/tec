@@ -324,12 +324,14 @@ class LinkMirrorRepository(
                         "updatedAt" to FieldValue.serverTimestamp()
                     )
                 ).await()
+            } else if (existing.exists()) {
+                return Result.failure(IllegalStateException("Code $pairingCode is already in use — tap New Code"))
             } else {
                 docRef.set(
                     mapOf(
                         "hostUid" to uid,
                         "hostDeviceId" to hostDeviceId,
-                        "hostDeviceName" to hostDeviceName.take(60),
+                        "hostDeviceName" to hostDeviceName.trim().ifBlank { "Host Device" }.take(60),
                         "controllerUid" to "",
                         "controllerDeviceName" to "",
                         "status" to "OPEN",
@@ -406,6 +408,31 @@ class LinkMirrorRepository(
                     "updatedAt" to FieldValue.serverTimestamp()
                 )
             ).await()
+            db.collection("pairings").document(pairing.id).update(
+                mapOf(
+                    "status" to "APPROVED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
+            Result.success(Unit)
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            handleFirestoreError(e, OperationType.UPDATE, path)
+            Result.failure(e)
+        }
+    }
+
+    suspend fun dismissPairing(pairingCode: String): Result<Unit> {
+        val path = "pairings/$pairingCode"
+        return try {
+            requireUserId()
+            db.collection("pairings").document(pairingCode).update(
+                mapOf(
+                    "status" to "REVOKED",
+                    "updatedAt" to FieldValue.serverTimestamp()
+                )
+            ).await()
             Result.success(Unit)
         } catch (e: CancellationException) {
             throw e
@@ -424,6 +451,9 @@ class LinkMirrorRepository(
         val path = "sessions/$sessionId"
         return try {
             val uid = requireUserId()
+            if (hostDevice.id == controllerDeviceId) {
+                return Result.failure(IllegalArgumentException("Cannot connect this device to itself"))
+            }
             val participants = listOf(hostDevice.ownerUid, uid).distinct().take(2)
             val docRef = db.collection("sessions").document(sessionId)
             val existing = docRef.get().await()
@@ -433,13 +463,15 @@ class LinkMirrorRepository(
                 SessionStatus.REQUESTED.name
             }
             if (!existing.exists()) {
+                val safeHostName = hostDevice.deviceName.trim().ifBlank { "Host Device" }.take(60)
+                val safeCtrlName = controllerDeviceName.trim().ifBlank { "Controller Phone" }.take(60)
                 val payload = mapOf(
                     "hostUid" to hostDevice.ownerUid,
                     "hostDeviceId" to hostDevice.id,
-                    "hostDeviceName" to hostDevice.deviceName.take(60),
+                    "hostDeviceName" to safeHostName,
                     "controllerUid" to uid,
                     "controllerDeviceId" to controllerDeviceId,
-                    "controllerDeviceName" to controllerDeviceName.take(60),
+                    "controllerDeviceName" to safeCtrlName,
                     "participantUids" to participants,
                     "status" to desiredStatus,
                     "alwaysAllow" to hostDevice.alwaysAllowControl,
@@ -455,17 +487,18 @@ class LinkMirrorRepository(
             } else {
                 val currentStatus = existing.getString("status")
                 if (currentStatus == SessionStatus.ENDED.name) {
-                    // Host can reactivate, or create a fresh session ID when ENDED
+                    val safeHostName = hostDevice.deviceName.trim().ifBlank { "Host Device" }.take(60)
+                    val safeCtrlName = controllerDeviceName.trim().ifBlank { "Controller Phone" }.take(60)
                     val freshId = "sess_${UUID.randomUUID().toString().replace("-", "").take(18)}"
                     val freshRef = db.collection("sessions").document(freshId)
                     freshRef.set(
                         mapOf(
                             "hostUid" to hostDevice.ownerUid,
                             "hostDeviceId" to hostDevice.id,
-                            "hostDeviceName" to hostDevice.deviceName.take(60),
+                            "hostDeviceName" to safeHostName,
                             "controllerUid" to uid,
                             "controllerDeviceId" to controllerDeviceId,
-                            "controllerDeviceName" to controllerDeviceName.take(60),
+                            "controllerDeviceName" to safeCtrlName,
                             "participantUids" to participants,
                             "status" to desiredStatus,
                             "alwaysAllow" to hostDevice.alwaysAllowControl,
@@ -562,6 +595,9 @@ class LinkMirrorRepository(
         val path = "sessions/${session.id}/commands/$cmdId"
         return try {
             val uid = requireUserId()
+            if (session.status == SessionStatus.ENDED.name) {
+                return Result.failure(IllegalStateException("Session has already ended"))
+            }
             val payload = mapOf(
                 "senderUid" to uid,
                 "hostUid" to session.hostUid,
@@ -624,12 +660,15 @@ class LinkMirrorRepository(
         val path = "sessions/${session.id}/sharedPhotos/$photoId"
         return try {
             val uid = requireUserId()
+            if (session.status == SessionStatus.ENDED.name) {
+                return Result.failure(IllegalStateException("Session has already ended"))
+            }
             require(imageBase64.length in 10..400_000) { "Compressed image exceeds 400KB limit" }
             val payload = mapOf(
                 "senderUid" to uid,
-                "senderDeviceName" to senderDeviceName.take(60).ifBlank { "Device" },
+                "senderDeviceName" to senderDeviceName.trim().ifBlank { "Device" }.take(60),
                 "participantUids" to session.participantUids,
-                "title" to title.take(100).ifBlank { "Shared Photo" },
+                "title" to title.trim().ifBlank { "Shared Photo" }.take(100),
                 "source" to source.name,
                 "imageBase64" to imageBase64,
                 "createdAt" to FieldValue.serverTimestamp(),

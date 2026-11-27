@@ -186,6 +186,14 @@ test("Pairing code flow: host opens 6-digit code, controller claims, no listing 
       updatedAt: pastDate(200),
     })
   );
+
+  // Host Alice marks the claimed pairing APPROVED after granting trust
+  await assertSucceeds(
+    aliceDb.collection("pairings").doc("482910").update({
+      status: "APPROVED",
+      updatedAt: pastDate(100),
+    })
+  );
 });
 
 test("Session, remote commands, and shared photos enforce trusted device & participant isolation", async () => {

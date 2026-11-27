@@ -3,6 +3,8 @@ package com.example.ui.screens
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
@@ -18,16 +20,19 @@ import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.Logout
 import androidx.compose.material.icons.rounded.DeleteForever
 import androidx.compose.material.icons.rounded.Edit
+import androidx.compose.material.icons.rounded.Lock
 import androidx.compose.material.icons.rounded.Security
 import androidx.compose.material.icons.rounded.VerifiedUser
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.FilterChip
+import androidx.compose.material3.FilledTonalButton
 import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
+import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
@@ -38,6 +43,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.unit.dp
+import com.example.data.AppLockConfig
 import com.example.data.DeviceEntity
 import com.example.data.LocalDeviceConfig
 import com.example.data.RemoteSession
@@ -49,13 +55,20 @@ import com.example.ui.theme.CyanPulse
 import com.example.ui.theme.EmeraldLink
 import com.example.ui.theme.OutlineSubtle
 
+@OptIn(ExperimentalLayoutApi::class)
 @Composable
 fun SecurityScreen(
     userEmail: String,
     currentUserId: String,
     localConfig: LocalDeviceConfig,
+    appLockConfig: AppLockConfig,
     devicesState: UiState<List<DeviceEntity>>,
     sessionsState: UiState<List<RemoteSession>>,
+    onSaveAppPin: suspend (String) -> Boolean,
+    onVerifyAppPin: suspend (String) -> Boolean,
+    onDisableAppLock: suspend (String) -> Boolean,
+    onUpdateAppLockOptions: (Boolean?, Boolean?, Boolean?) -> Unit,
+    onLockAppNow: () -> Unit,
     onUpdateDeviceName: (String) -> Unit,
     onChangeRoleMode: (RoleMode) -> Unit,
     onRevokeTrustedUid: (String) -> Unit,
@@ -64,15 +77,184 @@ fun SecurityScreen(
     onSignOut: () -> Unit
 ) {
     var nameDraft by remember(localConfig.deviceName) { mutableStateOf(localConfig.deviceName) }
+    var activePinDialog by remember { mutableStateOf<PinDialogMode?>(null) }
 
     val thisDevice = (devicesState as? UiState.Success)?.data?.firstOrNull { it.id == localConfig.deviceId }
     val externalTrustedUids = thisDevice?.trustedUids?.filter { it != currentUserId }.orEmpty()
+
+    activePinDialog?.let { mode ->
+        AppPinSetupDialog(
+            mode = mode,
+            onDismiss = { activePinDialog = null },
+            onVerifyCurrentPin = onVerifyAppPin,
+            onSaveNewPin = onSaveAppPin,
+            onDisableLock = onDisableAppLock
+        )
+    }
 
     LazyColumn(
         modifier = Modifier.fillMaxSize(),
         contentPadding = PaddingValues(16.dp),
         verticalArrangement = Arrangement.spacedBy(16.dp)
     ) {
+        item(key = "app_lock_card") {
+            Surface(
+                color = MaterialTheme.colorScheme.surface,
+                shape = MaterialTheme.shapes.large,
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .border(
+                        1.dp,
+                        if (appLockConfig.isPinEnabled) EmeraldLink.copy(alpha = 0.55f) else OutlineSubtle,
+                        MaterialTheme.shapes.large
+                    )
+            ) {
+                Column(
+                    modifier = Modifier.padding(16.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp)
+                ) {
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        horizontalArrangement = Arrangement.SpaceBetween,
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        Row(verticalAlignment = Alignment.CenterVertically) {
+                            Icon(
+                                imageVector = Icons.Rounded.Lock,
+                                contentDescription = null,
+                                tint = if (appLockConfig.isPinEnabled) EmeraldLink else CyanPulse
+                            )
+                            Spacer(Modifier.width(8.dp))
+                            Text("App Lock & Touch Shield", style = MaterialTheme.typography.titleMedium)
+                        }
+                        StatusPill(
+                            text = if (appLockConfig.isPinEnabled) "LOCKED" else "OFF",
+                            active = appLockConfig.isPinEnabled
+                        )
+                    }
+                    Text(
+                        text = if (appLockConfig.isPinEnabled) {
+                            "Only you can open or touch inside Screen Control using your PIN or phone lock/fingerprint."
+                        } else {
+                            "Protect Screen Control with a 4–6 digit PIN and phone fingerprint lock so nobody else can open or touch inside the app."
+                        },
+                        style = MaterialTheme.typography.bodyMedium,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant
+                    )
+
+                    if (!appLockConfig.isPinEnabled) {
+                        Button(
+                            onClick = { activePinDialog = PinDialogMode.SET_NEW },
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("setup_app_pin_button")
+                        ) {
+                            Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Enable App Lock PIN")
+                        }
+                    } else {
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            FilledTonalButton(
+                                onClick = { activePinDialog = PinDialogMode.CHANGE_EXISTING },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("change_app_pin_button")
+                            ) {
+                                Text("Change PIN")
+                            }
+                            OutlinedButton(
+                                onClick = { activePinDialog = PinDialogMode.DISABLE_EXISTING },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("disable_app_pin_button")
+                            ) {
+                                Text("Turn Off", color = CoralAlert)
+                            }
+                        }
+
+                        Button(
+                            onClick = onLockAppNow,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .height(48.dp)
+                                .testTag("lock_app_now_button")
+                        ) {
+                            Icon(Icons.Rounded.Lock, contentDescription = null, modifier = Modifier.size(18.dp))
+                            Spacer(Modifier.width(8.dp))
+                            Text("Lock App Now")
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Auto-Lock When Leaving App", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Require unlock every time you switch back",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = appLockConfig.autoLockInBackground,
+                                onCheckedChange = { onUpdateAppLockOptions(it, null, null) },
+                                modifier = Modifier.testTag("auto_lock_bg_switch")
+                            )
+                        }
+
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            verticalAlignment = Alignment.CenterVertically,
+                            horizontalArrangement = Arrangement.SpaceBetween
+                        ) {
+                            Column(modifier = Modifier.weight(1f)) {
+                                Text("Unlock with Phone Fingerprint / Lock", style = MaterialTheme.typography.titleSmall)
+                                Text(
+                                    "Allow device biometric or screen lock to open",
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.onSurfaceVariant
+                                )
+                            }
+                            Switch(
+                                checked = appLockConfig.allowDeviceUnlock,
+                                onCheckedChange = { onUpdateAppLockOptions(null, it, null) },
+                                modifier = Modifier.testTag("device_unlock_switch")
+                            )
+                        }
+                    }
+
+                    Row(
+                        modifier = Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.SpaceBetween
+                    ) {
+                        Column(modifier = Modifier.weight(1f)) {
+                            Text("Privacy Shield (Hide Recents & Screenshots)", style = MaterialTheme.typography.titleSmall)
+                            Text(
+                                "Blocks local screenshots and hides preview in Recent Apps",
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                            )
+                        }
+                        Switch(
+                            checked = appLockConfig.privacyScreenShield,
+                            onCheckedChange = { onUpdateAppLockOptions(null, null, it) },
+                            modifier = Modifier.testTag("privacy_shield_switch")
+                        )
+                    }
+                }
+            }
+        }
+
         item(key = "identity_card") {
             Surface(
                 color = MaterialTheme.colorScheme.surface,
@@ -124,7 +306,10 @@ fun SecurityScreen(
                     }
 
                     Text("Operating Role", style = MaterialTheme.typography.labelLarge)
-                    Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                    FlowRow(
+                        horizontalArrangement = Arrangement.spacedBy(8.dp),
+                        verticalArrangement = Arrangement.spacedBy(4.dp)
+                    ) {
                         RoleMode.entries.forEach { mode ->
                             FilterChip(
                                 selected = localConfig.roleMode == mode,

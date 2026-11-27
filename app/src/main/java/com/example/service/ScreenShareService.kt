@@ -20,6 +20,7 @@ import android.os.Build
 import android.os.Handler
 import android.os.IBinder
 import android.os.Looper
+import android.os.PowerManager
 import android.util.DisplayMetrics
 import android.util.Log
 import android.view.WindowManager
@@ -61,9 +62,11 @@ class ScreenShareService : Service() {
     private val frameSequence = AtomicLong(0L)
     private val isUploadingFrame = AtomicBoolean(false)
     private var lastFrameSentAtMs = 0L
+    private var lastIdleCacheAtMs = 0L
 
     private lateinit var repository: LinkMirrorRepository
     private lateinit var preferences: DevicePreferences
+    private var wakeLock: PowerManager.WakeLock? = null
     private var hostDeviceId: String = ""
     private var hostDeviceName: String = "Host Device"
     @Volatile
@@ -75,8 +78,12 @@ class ScreenShareService : Service() {
     @Volatile
     private var lastEncodedFrameBase64: String? = null
 
+    private val captureLock = Any()
+
     @Volatile
     private var activeSession: RemoteSession? = null
+    @Volatile
+    private var observedCommandsSessionId: String? = null
 
     private var configJob: Job? = null
     private var sessionsJob: Job? = null
@@ -136,34 +143,45 @@ class ScreenShareService : Service() {
             return START_NOT_STICKY
         }
 
-        val notification = buildNotification()
-        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
-            startForeground(
-                NOTIFICATION_ID,
-                notification,
-                ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+        try {
+            val notification = buildNotification()
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                startForeground(
+                    NOTIFICATION_ID,
+                    notification,
+                    ServiceInfo.FOREGROUND_SERVICE_TYPE_MEDIA_PROJECTION
+                )
+            } else {
+                startForeground(NOTIFICATION_ID, notification)
+            }
+
+            val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as? MediaProjectionManager
+            val projection = mgr?.getMediaProjection(resultCode, projectionData)
+            if (projection == null) {
+                ScreenCaptureBus.setScreenShareRunning(false, "Failed to obtain MediaProjection")
+                stopSelf()
+                return START_NOT_STICKY
+            }
+
+            cleanupCaptureResources()
+            acquireWakeLock()
+            mediaProjection = projection
+            projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
+
+            computeInitialCaptureMetrics()
+            createVirtualDisplayAndReader(projection)
+            ScreenCaptureBus.setScreenShareRunning(true)
+
+            startSessionObservers()
+        } catch (e: Exception) {
+            Log.e(TAG, "Failed to start screen share service: ${e.message}", e)
+            cleanupCaptureResources()
+            ScreenCaptureBus.setScreenShareRunning(
+                false,
+                e.localizedMessage ?: "Screen capture permission expired — tap Start again"
             )
-        } else {
-            startForeground(NOTIFICATION_ID, notification)
-        }
-
-        val mgr = getSystemService(Context.MEDIA_PROJECTION_SERVICE) as MediaProjectionManager
-        val projection = mgr.getMediaProjection(resultCode, projectionData)
-        if (projection == null) {
-            ScreenCaptureBus.setScreenShareRunning(false, "Failed to obtain MediaProjection")
             stopSelf()
-            return START_NOT_STICKY
         }
-
-        cleanupCaptureResources()
-        mediaProjection = projection
-        projection.registerCallback(projectionCallback, Handler(Looper.getMainLooper()))
-
-        computeInitialCaptureMetrics()
-        createVirtualDisplayAndReader(projection)
-        ScreenCaptureBus.setScreenShareRunning(true)
-
-        startSessionObservers()
         return START_NOT_STICKY
     }
 
@@ -173,7 +191,9 @@ class ScreenShareService : Service() {
             val bounds = windowManager.maximumWindowMetrics.bounds
             bounds.width() to bounds.height()
         } else {
-            val dm = resources.displayMetrics
+            val dm = DisplayMetrics()
+            @Suppress("DEPRECATION")
+            windowManager.defaultDisplay.getRealMetrics(dm)
             dm.widthPixels to dm.heightPixels
         }
         val scale = 540f / maxOf(fullW, fullH).coerceAtLeast(1)
@@ -186,103 +206,161 @@ class ScreenShareService : Service() {
         val reader = ImageReader.newInstance(captureWidth, captureHeight, PixelFormat.RGBA_8888, 2)
         imageReader = reader
         reader.setOnImageAvailableListener({ imgReader ->
-            val session = activeSession
-            if (session == null) {
-                if (lastEncodedFrameBase64 == null && isUploadingFrame.compareAndSet(false, true)) {
-                    val img = imgReader.acquireLatestImage()
-                    if (img == null) {
-                        isUploadingFrame.set(false)
-                        return@setOnImageAvailableListener
-                    }
-                    val bmp = imageToBitmap(img)
-                    img.close()
-                    if (bmp != null) {
-                        serviceScope.launch {
-                            try {
-                                lastEncodedFrameBase64 = ImageCodec.encodeBitmapToBase64(
-                                    bitmap = bmp,
-                                    maxDimension = streamMode.maxDimension,
-                                    initialQuality = streamMode.jpegQuality
-                                )
+            try {
+                var pendingSession: RemoteSession? = null
+                var pendingMode: com.example.data.StreamMode = streamMode
+                var pendingBitmap: Bitmap? = null
+                var pendingFingerprint = 0L
+                var isIdleCacheRefresh = false
+
+                synchronized(captureLock) {
+                    if (imageReader !== imgReader) return@setOnImageAvailableListener
+                    val session = activeSession
+                    if (session == null) {
+                        val nowIdle = System.currentTimeMillis()
+                        val shouldRefreshCache = lastEncodedFrameBase64 == null || (nowIdle - lastIdleCacheAtMs >= 2000L)
+                        if (shouldRefreshCache && isUploadingFrame.compareAndSet(false, true)) {
+                            val img = imgReader.acquireLatestImage()
+                            if (img == null) {
+                                isUploadingFrame.set(false)
+                                return@setOnImageAvailableListener
+                            }
+                            val bmp = try {
+                                imageToBitmap(img)
                             } finally {
-                                bmp.recycle()
+                                img.close()
+                            }
+                            if (bmp != null) {
+                                lastIdleCacheAtMs = nowIdle
+                                pendingBitmap = bmp
+                                isIdleCacheRefresh = true
+                            } else {
                                 isUploadingFrame.set(false)
                             }
+                        } else {
+                            imgReader.acquireLatestImage()?.close()
                         }
-                    } else {
+                        return@synchronized
+                    }
+
+                    if (session.status != SessionStatus.ACTIVE.name &&
+                        !(session.alwaysAllow && session.status == SessionStatus.REQUESTED.name)
+                    ) {
+                        imgReader.acquireLatestImage()?.close()
+                        return@synchronized
+                    }
+
+                    val mode = streamMode
+                    val now = System.currentTimeMillis()
+                    if (now - lastFrameSentAtMs < mode.intervalMs || !isUploadingFrame.compareAndSet(false, true)) {
+                        imgReader.acquireLatestImage()?.close()
+                        return@synchronized
+                    }
+
+                    val image = imgReader.acquireLatestImage()
+                    if (image == null) {
+                        isUploadingFrame.set(false)
+                        return@synchronized
+                    }
+
+                    val bitmap = try {
+                        imageToBitmap(image)
+                    } finally {
+                        image.close()
+                    }
+
+                    if (bitmap == null) {
+                        isUploadingFrame.set(false)
+                        return@synchronized
+                    }
+
+                    val fingerprint = computeQuickFingerprint(bitmap)
+                    val elapsed = System.currentTimeMillis() - lastFrameSentAtMs
+                    if (fingerprint == lastFrameFingerprint &&
+                        session.latestFrameBase64.isNotBlank() &&
+                        elapsed < KEEPALIVE_FRAME_MS
+                    ) {
+                        bitmap.recycle()
+                        isUploadingFrame.set(false)
+                        return@synchronized
+                    }
+
+                    pendingSession = session
+                    pendingMode = mode
+                    pendingBitmap = bitmap
+                    pendingFingerprint = fingerprint
+                }
+
+                val bitmapToSend = pendingBitmap ?: return@setOnImageAvailableListener
+                if (isIdleCacheRefresh) {
+                    serviceScope.launch {
+                        try {
+                            val encoded = ImageCodec.encodeBitmapToBase64(
+                                bitmap = bitmapToSend,
+                                maxDimension = pendingMode.maxDimension,
+                                initialQuality = pendingMode.jpegQuality
+                            )
+                            if (encoded.isNotBlank()) {
+                                lastEncodedFrameBase64 = encoded
+                            }
+                        } catch (t: Throwable) {
+                            Log.w(TAG, "Idle cache encode skipped: ${t.message}")
+                        } finally {
+                            if (!bitmapToSend.isRecycled) bitmapToSend.recycle()
+                            isUploadingFrame.set(false)
+                        }
+                    }
+                    return@setOnImageAvailableListener
+                }
+
+                val targetSession = pendingSession ?: run {
+                    if (!bitmapToSend.isRecycled) bitmapToSend.recycle()
+                    isUploadingFrame.set(false)
+                    return@setOnImageAvailableListener
+                }
+
+                serviceScope.launch {
+                    try {
+                        val b64 = ImageCodec.encodeBitmapToBase64(
+                            bitmap = bitmapToSend,
+                            maxDimension = pendingMode.maxDimension,
+                            initialQuality = pendingMode.jpegQuality
+                        )
+                        if (b64.isBlank()) {
+                            return@launch
+                        }
+                        lastEncodedFrameBase64 = b64
+                        val seq = frameSequence.incrementAndGet()
+                        lastFrameFingerprint = pendingFingerprint
+                        lastFrameSentAtMs = System.currentTimeMillis()
+                        val res = repository.updateSessionFrame(
+                            sessionId = targetSession.id,
+                            frameBase64 = b64,
+                            frameSeq = seq,
+                            width = captureWidth.toLong(),
+                            height = captureHeight.toLong(),
+                            remoteControlEnabled = ScreenCaptureBus.isAccessibilityServiceEnabled(applicationContext),
+                            alwaysAllow = alwaysAllow
+                        )
+                        if (res.isSuccess) {
+                            ScreenCaptureBus.setLastError(null)
+                            ScreenCaptureBus.recordFrameSent(seq)
+                        } else {
+                            ScreenCaptureBus.setLastError(
+                                res.exceptionOrNull()?.localizedMessage ?: "Frame sync error — retrying"
+                            )
+                        }
+                    } catch (t: Throwable) {
+                        Log.w(TAG, "Frame pipeline error: ${t.message}")
+                        ScreenCaptureBus.setLastError(t.localizedMessage ?: "Frame capture error")
+                    } finally {
+                        if (!bitmapToSend.isRecycled) bitmapToSend.recycle()
                         isUploadingFrame.set(false)
                     }
-                } else {
-                    imgReader.acquireLatestImage()?.close()
                 }
-                return@setOnImageAvailableListener
-            }
-            if (session.status != SessionStatus.ACTIVE.name &&
-                !(session.alwaysAllow && session.status == SessionStatus.REQUESTED.name)
-            ) {
-                val skip = imgReader.acquireLatestImage()
-                skip?.close()
-                return@setOnImageAvailableListener
-            }
-
-            val mode = streamMode
-            val now = System.currentTimeMillis()
-            if (now - lastFrameSentAtMs < mode.intervalMs || !isUploadingFrame.compareAndSet(false, true)) {
-                val drop = imgReader.acquireLatestImage()
-                drop?.close()
-                return@setOnImageAvailableListener
-            }
-
-            val image = imgReader.acquireLatestImage()
-            if (image == null) {
+            } catch (t: Throwable) {
                 isUploadingFrame.set(false)
-                return@setOnImageAvailableListener
-            }
-
-            val bitmap = try {
-                imageToBitmap(image)
-            } finally {
-                image.close()
-            }
-
-            if (bitmap == null) {
-                isUploadingFrame.set(false)
-                return@setOnImageAvailableListener
-            }
-
-            val fingerprint = computeQuickFingerprint(bitmap)
-            val elapsed = System.currentTimeMillis() - lastFrameSentAtMs
-            if (fingerprint == lastFrameFingerprint && elapsed < KEEPALIVE_FRAME_MS) {
-                bitmap.recycle()
-                isUploadingFrame.set(false)
-                return@setOnImageAvailableListener
-            }
-
-            serviceScope.launch {
-                try {
-                    val b64 = ImageCodec.encodeBitmapToBase64(
-                        bitmap = bitmap,
-                        maxDimension = mode.maxDimension,
-                        initialQuality = mode.jpegQuality
-                    )
-                    lastEncodedFrameBase64 = b64
-                    val seq = frameSequence.incrementAndGet()
-                    lastFrameFingerprint = fingerprint
-                    lastFrameSentAtMs = System.currentTimeMillis()
-                    repository.updateSessionFrame(
-                        sessionId = session.id,
-                        frameBase64 = b64,
-                        frameSeq = seq,
-                        width = captureWidth.toLong(),
-                        height = captureHeight.toLong(),
-                        remoteControlEnabled = ScreenCaptureBus.isAccessibilityServiceEnabled(applicationContext),
-                        alwaysAllow = alwaysAllow
-                    )
-                    ScreenCaptureBus.recordFrameSent(seq)
-                } finally {
-                    bitmap.recycle()
-                    isUploadingFrame.set(false)
-                }
+                Log.w(TAG, "ImageReader callback guarded: ${t.message}")
             }
         }, Handler(Looper.getMainLooper()))
 
@@ -299,6 +377,7 @@ class ScreenShareService : Service() {
     }
 
     private fun computeQuickFingerprint(bitmap: Bitmap): Long {
+        if (bitmap.isRecycled || bitmap.width <= 0 || bitmap.height <= 0) return 0L
         var hash = 1125899906842597L
         val stepX = (bitmap.width / 12).coerceAtLeast(1)
         val stepY = (bitmap.height / 16).coerceAtLeast(1)
@@ -316,13 +395,17 @@ class ScreenShareService : Service() {
 
     private fun imageToBitmap(image: android.media.Image): Bitmap? {
         return try {
+            if (image.planes.isEmpty() || captureWidth <= 0 || captureHeight <= 0) return null
             val plane = image.planes[0]
             val buffer = plane.buffer
+            buffer.rewind()
             val pixelStride = plane.pixelStride
+            if (pixelStride <= 0) return null
             val rowStride = plane.rowStride
             val rowPadding = rowStride - pixelStride * captureWidth
+            val extraCols = (rowPadding / pixelStride).coerceAtLeast(0)
             val rawBmp = Bitmap.createBitmap(
-                captureWidth + rowPadding / pixelStride,
+                captureWidth + extraCols,
                 captureHeight,
                 Bitmap.Config.ARGB_8888
             )
@@ -334,17 +417,19 @@ class ScreenShareService : Service() {
             } else {
                 rawBmp
             }
-        } catch (e: Exception) {
-            Log.w(TAG, "Frame decode error: ${e.message}")
+        } catch (t: Throwable) {
+            Log.w(TAG, "Frame decode error: ${t.message}")
             null
         }
     }
 
     private fun recreateVirtualDisplaySurface() {
-        val projection = mediaProjection ?: return
-        virtualDisplay?.release()
-        imageReader?.close()
-        createVirtualDisplayAndReader(projection)
+        synchronized(captureLock) {
+            val projection = mediaProjection ?: return
+            virtualDisplay?.release()
+            imageReader?.close()
+            createVirtualDisplayAndReader(projection)
+        }
     }
 
     private fun startSessionObservers() {
@@ -362,23 +447,26 @@ class ScreenShareService : Service() {
         }
 
         sessionsJob = serviceScope.launch {
-            val config = preferences.getOrInitConfig()
+            val uid = Firebase.auth.currentUser?.uid ?: return@launch
+            val config = preferences.getOrInitConfig(uid)
             hostDeviceId = config.deviceId
             hostDeviceName = config.deviceName
             alwaysAllow = config.alwaysAllowControl
             streamMode = config.streamMode
             syncDeviceShareState(active = true)
 
-            val uid = Firebase.auth.currentUser?.uid ?: return@launch
             repository.observeSessions(uid)
                 .catch { e -> Log.w(TAG, "Session observer error: ${e.message}") }
                 .collectLatest { sessions ->
-                    val cfg = preferences.getOrInitConfig()
+                    val cfg = preferences.getOrInitConfig(uid)
+                    hostDeviceId = cfg.deviceId
+                    hostDeviceName = cfg.deviceName
                     alwaysAllow = cfg.alwaysAllowControl
                     streamMode = cfg.streamMode
 
                     val candidate = sessions.firstOrNull { s ->
-                        s.hostDeviceId == hostDeviceId &&
+                        s.hostUid == uid &&
+                            s.hostDeviceId == hostDeviceId &&
                             (s.status == SessionStatus.ACTIVE.name ||
                                 (alwaysAllow && s.status == SessionStatus.REQUESTED.name))
                     }
@@ -406,8 +494,12 @@ class ScreenShareService : Service() {
                                 ScreenCaptureBus.recordFrameSent(seq)
                             }
                         }
-                        observeHostSpecialCommands(candidate, uid)
+                        if (candidate.id != observedCommandsSessionId) {
+                            observedCommandsSessionId = candidate.id
+                            observeHostSpecialCommands(candidate, uid)
+                        }
                     } else {
+                        observedCommandsSessionId = null
                         commandsJob?.cancel()
                     }
                 }
@@ -417,6 +509,7 @@ class ScreenShareService : Service() {
             while (true) {
                 delay(45_000L)
                 if (mediaProjection != null && Firebase.auth.currentUser != null) {
+                    acquireWakeLock()
                     syncDeviceShareState(active = true)
                 }
             }
@@ -433,25 +526,40 @@ class ScreenShareService : Service() {
                         it.status == CommandStatus.PENDING.name &&
                             (it.type == CommandType.CAPTURE_SNAPSHOT.name || it.type == CommandType.WAKE_STREAM.name)
                     }.forEach { cmd ->
+                        val liveSession = activeSession ?: session
                         when (CommandType.fromRaw(cmd.type)) {
                             CommandType.CAPTURE_SNAPSHOT -> {
-                                val latestFrame = captureSingleSnapshotBase64()
-                                if (latestFrame != null) {
+                                val latestFrame = captureSingleSnapshotBase64() ?: lastEncodedFrameBase64
+                                if (!latestFrame.isNullOrBlank()) {
                                     repository.uploadSharedPhoto(
-                                        session = session,
+                                        session = liveSession,
                                         senderDeviceName = hostDeviceName,
                                         title = "Screen Snapshot #${frameSequence.get() + 1}",
                                         source = PhotoSource.SCREEN_SNAPSHOT,
                                         imageBase64 = latestFrame
                                     )
-                                    repository.markCommandStatus(session.id, cmd.id, CommandStatus.EXECUTED)
+                                    repository.markCommandStatus(liveSession.id, cmd.id, CommandStatus.EXECUTED)
                                 } else {
-                                    repository.markCommandStatus(session.id, cmd.id, CommandStatus.FAILED)
+                                    repository.markCommandStatus(liveSession.id, cmd.id, CommandStatus.FAILED)
                                 }
                             }
                             CommandType.WAKE_STREAM -> {
                                 lastFrameSentAtMs = 0L
-                                repository.markCommandStatus(session.id, cmd.id, CommandStatus.EXECUTED)
+                                val instantFrame = captureSingleSnapshotBase64() ?: lastEncodedFrameBase64
+                                if (!instantFrame.isNullOrBlank()) {
+                                    val seq = frameSequence.incrementAndGet()
+                                    repository.updateSessionFrame(
+                                        sessionId = liveSession.id,
+                                        frameBase64 = instantFrame,
+                                        frameSeq = seq,
+                                        width = captureWidth.toLong(),
+                                        height = captureHeight.toLong(),
+                                        remoteControlEnabled = ScreenCaptureBus.isAccessibilityServiceEnabled(applicationContext),
+                                        alwaysAllow = alwaysAllow
+                                    )
+                                    ScreenCaptureBus.recordFrameSent(seq)
+                                }
+                                repository.markCommandStatus(liveSession.id, cmd.id, CommandStatus.EXECUTED)
                             }
                             else -> Unit
                         }
@@ -461,39 +569,31 @@ class ScreenShareService : Service() {
     }
 
     private fun captureSingleSnapshotBase64(): String? {
-        val reader = imageReader ?: return activeSession?.latestFrameBase64?.takeIf { it.isNotBlank() }
-        val img = reader.acquireLatestImage() ?: return activeSession?.latestFrameBase64?.takeIf { it.isNotBlank() }
-        return try {
-            val plane = img.planes[0]
-            val pixelStride = plane.pixelStride
-            val rowStride = plane.rowStride
-            val rowPadding = rowStride - pixelStride * captureWidth
-            val rawBmp = Bitmap.createBitmap(
-                captureWidth + rowPadding / pixelStride,
-                captureHeight,
-                Bitmap.Config.ARGB_8888
-            )
-            rawBmp.copyPixelsFromBuffer(plane.buffer)
-            val cropped = if (rawBmp.width != captureWidth) {
-                val c = Bitmap.createBitmap(rawBmp, 0, 0, captureWidth, captureHeight)
-                rawBmp.recycle()
-                c
-            } else {
-                rawBmp
+        synchronized(captureLock) {
+            val reader = imageReader ?: return activeSession?.latestFrameBase64?.takeIf { it.isNotBlank() }
+            val img = try {
+                reader.acquireLatestImage()
+            } catch (_: Exception) {
+                null
+            } ?: return activeSession?.latestFrameBase64?.takeIf { it.isNotBlank() }
+            return try {
+                val bitmap = imageToBitmap(img) ?: return null
+                try {
+                    ImageCodec.encodeBitmapToBase64(bitmap, maxDimension = 720, initialQuality = 78)
+                } finally {
+                    bitmap.recycle()
+                }
+            } catch (_: Exception) {
+                null
+            } finally {
+                img.close()
             }
-            val encoded = ImageCodec.encodeBitmapToBase64(cropped, maxDimension = 720, initialQuality = 78)
-            cropped.recycle()
-            encoded
-        } catch (_: Exception) {
-            null
-        } finally {
-            img.close()
         }
     }
 
     private suspend fun syncDeviceShareState(active: Boolean) {
-        if (Firebase.auth.currentUser == null) return
-        val cfg = preferences.getOrInitConfig()
+        val uid = Firebase.auth.currentUser?.uid ?: return
+        val cfg = preferences.getOrInitConfig(uid)
         val dm = resources.displayMetrics
         repository.registerOrUpdateDevice(
             deviceId = cfg.deviceId,
@@ -519,13 +619,38 @@ class ScreenShareService : Service() {
     }
 
     private fun cleanupCaptureResources() {
-        virtualDisplay?.release()
-        virtualDisplay = null
-        imageReader?.close()
-        imageReader = null
-        mediaProjection?.unregisterCallback(projectionCallback)
-        mediaProjection?.stop()
-        mediaProjection = null
+        synchronized(captureLock) {
+            virtualDisplay?.release()
+            virtualDisplay = null
+            imageReader?.close()
+            imageReader = null
+            mediaProjection?.unregisterCallback(projectionCallback)
+            mediaProjection?.stop()
+            mediaProjection = null
+        }
+        releaseWakeLock()
+    }
+
+    private fun acquireWakeLock() {
+        try {
+            val pm = getSystemService(Context.POWER_SERVICE) as PowerManager
+            val wl = wakeLock ?: pm.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "ScreenControl::ShareWakeLock").also {
+                it.setReferenceCounted(false)
+                wakeLock = it
+            }
+            wl.acquire(10 * 60 * 1000L)
+        } catch (e: Exception) {
+            Log.w(TAG, "WakeLock acquire skipped: ${e.message}")
+        }
+    }
+
+    private fun releaseWakeLock() {
+        try {
+            if (wakeLock?.isHeld == true) {
+                wakeLock?.release()
+            }
+        } catch (_: Exception) {
+        }
     }
 
     private fun createNotificationChannel() {
@@ -582,7 +707,7 @@ class ScreenShareService : Service() {
         private const val TAG = "ScreenShareService"
         private const val CHANNEL_ID = "linkmirror_screen_share"
         private const val NOTIFICATION_ID = 4401
-        private const val KEEPALIVE_FRAME_MS = 4000L
+        private const val KEEPALIVE_FRAME_MS = 25_000L
 
         const val ACTION_START = "com.example.action.START_SCREEN_SHARE"
         const val ACTION_STOP = "com.example.action.STOP_SCREEN_SHARE"
@@ -590,23 +715,39 @@ class ScreenShareService : Service() {
         const val EXTRA_RESULT_DATA = "extra_result_data"
 
         fun start(context: Context, resultCode: Int, data: Intent) {
-            val intent = Intent(context, ScreenShareService::class.java).apply {
-                action = ACTION_START
-                putExtra(EXTRA_RESULT_CODE, resultCode)
-                putExtra(EXTRA_RESULT_DATA, data)
-            }
-            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
-                context.startForegroundService(intent)
-            } else {
-                context.startService(intent)
+            try {
+                val intent = Intent(context, ScreenShareService::class.java).apply {
+                    action = ACTION_START
+                    putExtra(EXTRA_RESULT_CODE, resultCode)
+                    putExtra(EXTRA_RESULT_DATA, data)
+                }
+                if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+                    context.startForegroundService(intent)
+                } else {
+                    context.startService(intent)
+                }
+            } catch (e: Exception) {
+                Log.e(TAG, "Unable to launch ScreenShareService: ${e.message}", e)
+                ScreenCaptureBus.setScreenShareRunning(
+                    false,
+                    e.localizedMessage ?: "Could not start screen sharing service"
+                )
             }
         }
 
         fun stop(context: Context) {
-            val intent = Intent(context, ScreenShareService::class.java).apply {
-                action = ACTION_STOP
+            try {
+                if (ScreenCaptureBus.telemetry.value.screenShareRunning) {
+                    val intent = Intent(context, ScreenShareService::class.java).apply {
+                        action = ACTION_STOP
+                    }
+                    context.startService(intent)
+                } else {
+                    context.stopService(Intent(context, ScreenShareService::class.java))
+                }
+            } catch (e: Exception) {
+                Log.w(TAG, "Stop service failed gracefully: ${e.message}")
             }
-            context.startService(intent)
         }
     }
 }

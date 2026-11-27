@@ -105,7 +105,7 @@
         },
         "status": {
           "type": "string",
-          "enum": ["OPEN", "CLAIMED", "REVOKED"],
+          "enum": ["OPEN", "CLAIMED", "APPROVED", "REVOKED"],
           "description": "Current pairing claim status."
         },
         "alwaysAllow": {

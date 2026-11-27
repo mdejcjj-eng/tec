@@ -3,6 +3,7 @@ package com.example.ui
 import android.util.Log
 import androidx.lifecycle.ViewModel
 import androidx.lifecycle.viewModelScope
+import com.example.data.AppLockConfig
 import com.example.data.CommandType
 import com.example.data.DeviceEntity
 import com.example.data.DevicePreferences
@@ -54,6 +55,13 @@ class LinkMirrorViewModel(
 
     val serviceTelemetry: StateFlow<HostServiceTelemetry> = ScreenCaptureBus.telemetry
 
+    val appLockConfig: StateFlow<AppLockConfig> = preferences.appLockConfigFlow
+        .stateIn(
+            scope = viewModelScope,
+            started = SharingStarted.WhileSubscribed(STOP_TIMEOUT_MS),
+            initialValue = AppLockConfig()
+        )
+
     val localConfig: StateFlow<LocalDeviceConfig> = preferences.configFlow
         .stateIn(
             scope = viewModelScope,
@@ -80,9 +88,18 @@ class LinkMirrorViewModel(
     val sessions: StateFlow<UiState<List<RemoteSession>>> =
         repository.observeSessions(currentUserId)
             .map<List<RemoteSession>, UiState<List<RemoteSession>>> { list ->
+                val myDeviceId = localConfig.value.deviceId
+                val currentSel = _selectedSessionId.value
+                if (currentSel != null) {
+                    val selectedObj = list.firstOrNull { it.id == currentSel }
+                    if (selectedObj != null && selectedObj.status == SessionStatus.ENDED.name) {
+                        _selectedSessionId.value = null
+                    }
+                }
                 if (_selectedSessionId.value == null) {
-                    val autoPick = list.firstOrNull {
-                        it.status == SessionStatus.ACTIVE.name || it.status == SessionStatus.REQUESTED.name
+                    val autoPick = list.firstOrNull { s ->
+                        (s.status == SessionStatus.ACTIVE.name || s.status == SessionStatus.REQUESTED.name) &&
+                            (myDeviceId.isBlank() || s.hostDeviceId != myDeviceId)
                     }
                     if (autoPick != null) {
                         _selectedSessionId.value = autoPick.id
@@ -159,15 +176,20 @@ class LinkMirrorViewModel(
 
     init {
         viewModelScope.launch {
-            val cfg = preferences.getOrInitConfig()
+            val cfg = preferences.getOrInitConfig(currentUserId)
             syncThisDevice(cfg)
+            while (true) {
+                kotlinx.coroutines.delay(60_000L)
+                val latestCfg = preferences.getOrInitConfig(currentUserId)
+                syncThisDevice(latestCfg)
+            }
         }
     }
 
     fun refreshAccessibilityStatus(enabled: Boolean) {
         ScreenCaptureBus.setAccessibilityConnected(enabled)
         viewModelScope.launch {
-            val cfg = preferences.getOrInitConfig()
+            val cfg = preferences.getOrInitConfig(currentUserId)
             syncThisDevice(cfg, accessibilityEnabled = enabled)
         }
     }
@@ -192,7 +214,7 @@ class LinkMirrorViewModel(
     fun setAlwaysAllowControl(enabled: Boolean) {
         viewModelScope.launch {
             preferences.updateAlwaysAllow(enabled)
-            val cfg = preferences.getOrInitConfig().copy(alwaysAllowControl = enabled)
+            val cfg = preferences.getOrInitConfig(currentUserId).copy(alwaysAllowControl = enabled)
             syncThisDevice(cfg)
             _snackbarEvents.tryEmit(
                 if (enabled) "Anytime trusted access enabled for paired devices"
@@ -204,7 +226,7 @@ class LinkMirrorViewModel(
     fun setRoleMode(mode: RoleMode) {
         viewModelScope.launch {
             preferences.updateRoleMode(mode)
-            val cfg = preferences.getOrInitConfig().copy(roleMode = mode)
+            val cfg = preferences.getOrInitConfig(currentUserId).copy(roleMode = mode)
             syncThisDevice(cfg)
         }
     }
@@ -216,12 +238,45 @@ class LinkMirrorViewModel(
         }
     }
 
+    suspend fun saveAppPin(pin: String): Boolean {
+        val ok = preferences.setAppPin(pin)
+        if (ok) {
+            _snackbarEvents.tryEmit("App Lock PIN enabled")
+        }
+        return ok
+    }
+
+    suspend fun verifyAppPin(pin: String): Boolean = preferences.verifyAppPin(pin)
+
+    suspend fun disableAppLock(currentPin: String): Boolean {
+        val verified = preferences.verifyAppPin(currentPin)
+        if (verified) {
+            preferences.clearAppPin()
+            _snackbarEvents.tryEmit("App Lock PIN disabled")
+        }
+        return verified
+    }
+
+    fun updateAppLockOptions(
+        autoLockInBackground: Boolean? = null,
+        allowDeviceUnlock: Boolean? = null,
+        privacyScreenShield: Boolean? = null
+    ) {
+        viewModelScope.launch {
+            preferences.updateAppLockOptions(
+                autoLockInBackground = autoLockInBackground,
+                allowDeviceUnlock = allowDeviceUnlock,
+                privacyScreenShield = privacyScreenShield
+            )
+        }
+    }
+
     fun updateDeviceName(newName: String) {
         val clean = newName.trim().take(60)
         if (clean.isBlank()) return
         viewModelScope.launch {
             preferences.updateDeviceName(clean)
-            val cfg = preferences.getOrInitConfig().copy(deviceName = clean)
+            val cfg = preferences.getOrInitConfig(currentUserId).copy(deviceName = clean)
             syncThisDevice(cfg)
             _snackbarEvents.tryEmit("Device renamed to $clean")
         }
@@ -231,20 +286,30 @@ class LinkMirrorViewModel(
         viewModelScope.launch {
             _isActionBusy.value = true
             try {
-                val cfg = preferences.getOrInitConfig()
-                val newCode = preferences.rotatePairingCode()
-                val updatedCfg = cfg.copy(pairingCode = newCode)
-                syncThisDevice(updatedCfg)
-                val res = repository.openPairingCode(
-                    pairingCode = newCode,
-                    hostDeviceId = updatedCfg.deviceId,
-                    hostDeviceName = updatedCfg.deviceName,
-                    alwaysAllow = updatedCfg.alwaysAllowControl
-                )
-                if (res.isSuccess) {
-                    _snackbarEvents.tryEmit("Pairing code $newCode is ready")
+                val cfg = preferences.getOrInitConfig(currentUserId)
+                var publishedCode: String? = null
+                var lastErr: Throwable? = null
+                repeat(3) {
+                    val newCode = preferences.rotatePairingCode()
+                    val updatedCfg = cfg.copy(pairingCode = newCode)
+                    syncThisDevice(updatedCfg)
+                    val res = repository.openPairingCode(
+                        pairingCode = newCode,
+                        hostDeviceId = updatedCfg.deviceId,
+                        hostDeviceName = updatedCfg.deviceName,
+                        alwaysAllow = updatedCfg.alwaysAllowControl
+                    )
+                    if (res.isSuccess) {
+                        publishedCode = newCode
+                        return@repeat
+                    } else {
+                        lastErr = res.exceptionOrNull()
+                    }
+                }
+                if (publishedCode != null) {
+                    _snackbarEvents.tryEmit("Pairing code $publishedCode is ready")
                 } else {
-                    _snackbarEvents.tryEmit(res.exceptionOrNull()?.localizedMessage ?: "Failed to open pairing code")
+                    _snackbarEvents.tryEmit(lastErr?.localizedMessage ?: "Failed to open pairing code")
                 }
             } finally {
                 _isActionBusy.value = false
@@ -256,7 +321,7 @@ class LinkMirrorViewModel(
         viewModelScope.launch {
             _isActionBusy.value = true
             try {
-                val cfg = preferences.getOrInitConfig()
+                val cfg = preferences.getOrInitConfig(currentUserId)
                 val res = repository.openPairingCode(
                     pairingCode = cfg.pairingCode,
                     hostDeviceId = cfg.deviceId,
@@ -274,7 +339,7 @@ class LinkMirrorViewModel(
         }
     }
 
-    fun claimPairingCode(code: String) {
+    fun claimPairingCode(code: String, onSuccess: () -> Unit = {}) {
         val clean = code.trim()
         if (!clean.matches(Regex("^[0-9]{6}$"))) {
             _snackbarEvents.tryEmit("Enter a valid 6-digit pairing code")
@@ -283,11 +348,12 @@ class LinkMirrorViewModel(
         viewModelScope.launch {
             _isActionBusy.value = true
             try {
-                val cfg = preferences.getOrInitConfig()
+                val cfg = preferences.getOrInitConfig(currentUserId)
                 val res = repository.claimPairingCode(clean, cfg.deviceName)
                 if (res.isSuccess) {
+                    onSuccess()
                     val hostName = res.getOrNull()?.hostDeviceName ?: "Host"
-                    _snackbarEvents.tryEmit("Paired with $hostName! Waiting for host trust sync.")
+                    _snackbarEvents.tryEmit("Paired with $hostName! Tap Grant Trust on $hostName to confirm.")
                 } else {
                     _snackbarEvents.tryEmit(res.exceptionOrNull()?.localizedMessage ?: "Invalid or expired code")
                 }
@@ -313,9 +379,25 @@ class LinkMirrorViewModel(
         }
     }
 
+    fun dismissClaimedPairing(pairing: PairingRecord) {
+        viewModelScope.launch {
+            _isActionBusy.value = true
+            try {
+                val res = repository.dismissPairing(pairing.id)
+                if (res.isSuccess) {
+                    _snackbarEvents.tryEmit("Pairing request dismissed")
+                } else {
+                    _snackbarEvents.tryEmit(res.exceptionOrNull()?.localizedMessage ?: "Could not dismiss pairing")
+                }
+            } finally {
+                _isActionBusy.value = false
+            }
+        }
+    }
+
     fun revokeTrustedController(uidToRemove: String) {
         viewModelScope.launch {
-            val cfg = preferences.getOrInitConfig()
+            val cfg = preferences.getOrInitConfig(currentUserId)
             val res = repository.revokeTrustedUid(cfg.deviceId, uidToRemove)
             if (res.isSuccess) {
                 _snackbarEvents.tryEmit("Trusted access revoked")
@@ -329,7 +411,7 @@ class LinkMirrorViewModel(
         viewModelScope.launch {
             _isActionBusy.value = true
             try {
-                val cfg = preferences.getOrInitConfig()
+                val cfg = preferences.getOrInitConfig(currentUserId)
                 val res = repository.startOrConnectSession(
                     hostDevice = hostDevice,
                     controllerDeviceId = cfg.deviceId,
@@ -414,7 +496,7 @@ class LinkMirrorViewModel(
         viewModelScope.launch {
             _isActionBusy.value = true
             try {
-                val cfg = preferences.getOrInitConfig()
+                val cfg = preferences.getOrInitConfig(currentUserId)
                 val res = repository.uploadSharedPhoto(
                     session = session,
                     senderDeviceName = cfg.deviceName,
@@ -431,6 +513,10 @@ class LinkMirrorViewModel(
                 _isActionBusy.value = false
             }
         }
+    }
+
+    fun notifyMessage(message: String) {
+        _snackbarEvents.tryEmit(message)
     }
 
     private fun <T> unwrapFirestoreError(label: String, error: Throwable): UiState<T> {

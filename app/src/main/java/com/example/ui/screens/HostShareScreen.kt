@@ -1,7 +1,9 @@
 package com.example.ui.screens
 
 import android.content.Intent
+import android.net.Uri
 import android.provider.Settings
+import android.widget.Toast
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
@@ -49,6 +51,8 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.testTag
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextAlign
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import com.example.data.LocalDeviceConfig
 import com.example.data.PairingRecord
@@ -75,6 +79,7 @@ fun HostShareScreen(
     onPublishPairingCode: () -> Unit,
     onRotatePairingCode: () -> Unit,
     onApprovePairing: (PairingRecord) -> Unit,
+    onDismissPairing: (PairingRecord) -> Unit,
     onApproveSession: (String) -> Unit,
     onEndSession: (String) -> Unit
 ) {
@@ -94,7 +99,7 @@ fun HostShareScreen(
             title = { Text("Enable Remote Touch Control") },
             text = {
                 Text(
-                    "LinkMirror uses Android Accessibility Service solely to execute taps, swipes, and Back/Home/Recents gestures sent by your authorized trusted controller.\n\n" +
+                    "Screen Control uses Android Accessibility Service solely to execute taps, swipes, and Back/Home/Recents gestures sent by your authorized trusted controller.\n\n" +
                         "• Screen window content is NOT read by the accessibility service.\n" +
                         "• You can turn off remote control or revoke trusted devices anytime."
                 )
@@ -103,10 +108,24 @@ fun HostShareScreen(
                 Button(
                     onClick = {
                         showAccessibilityDisclosure = false
-                        context.startActivity(
-                            Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
-                                .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
-                        )
+                        try {
+                            context.startActivity(
+                                Intent(Settings.ACTION_ACCESSIBILITY_SETTINGS)
+                                    .addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                            )
+                        } catch (_: Exception) {
+                            try {
+                                context.startActivity(
+                                    Intent(Settings.ACTION_SETTINGS).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            } catch (_: Exception) {
+                                Toast.makeText(
+                                    context,
+                                    "Open Phone Settings → Accessibility manually",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        }
                     },
                     modifier = Modifier.testTag("confirm_accessibility_settings_button")
                 ) {
@@ -265,6 +284,31 @@ fun HostShareScreen(
                             Text("Arm & Start Screen Sharing")
                         }
                     }
+
+                    OutlinedButton(
+                        onClick = {
+                            try {
+                                context.startActivity(
+                                    Intent(
+                                        Settings.ACTION_APPLICATION_DETAILS_SETTINGS,
+                                        Uri.fromParts("package", context.packageName, null)
+                                    ).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK)
+                                )
+                            } catch (_: Exception) {
+                                Toast.makeText(
+                                    context,
+                                    "Open Phone Settings → Apps → Screen Control → Battery",
+                                    Toast.LENGTH_LONG
+                                ).show()
+                            }
+                        },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(48.dp)
+                            .testTag("app_battery_settings_button")
+                    ) {
+                        Text("Keep Running 24/7 (Set Battery → Unrestricted)")
+                    }
                 }
             }
         }
@@ -300,15 +344,29 @@ fun HostShareScreen(
                                 selected = selected,
                                 onClick = { onChangeStreamMode(mode) },
                                 label = {
-                                    Column(modifier = Modifier.padding(vertical = 4.dp)) {
-                                        Text(mode.title, fontWeight = FontWeight.SemiBold)
+                                    Column(
+                                        modifier = Modifier
+                                            .fillMaxWidth()
+                                            .padding(vertical = 4.dp),
+                                        horizontalAlignment = Alignment.CenterHorizontally
+                                    ) {
+                                        Text(
+                                            text = mode.title,
+                                            style = MaterialTheme.typography.labelLarge,
+                                            fontWeight = FontWeight.SemiBold,
+                                            maxLines = 1,
+                                            softWrap = false,
+                                            overflow = TextOverflow.Ellipsis
+                                        )
                                         Text(
                                             text = when (mode) {
                                                 com.example.data.StreamMode.ECO -> "6–8h/day"
                                                 com.example.data.StreamMode.BALANCED -> "Smart"
                                                 com.example.data.StreamMode.SMOOTH -> "Fastest"
                                             },
-                                            style = MaterialTheme.typography.labelSmall
+                                            style = MaterialTheme.typography.labelSmall,
+                                            maxLines = 1,
+                                            softWrap = false
                                         )
                                     }
                                 },
@@ -361,7 +419,7 @@ fun HostShareScreen(
                         text = if (telemetry.accessibilityConnected) {
                             "Accessibility gesture service is active. Executed ${telemetry.commandsExecuted} remote action(s)."
                         } else {
-                            "Turn on 'LinkMirror Remote Control' in Android Accessibility Settings to let Phone 1 tap, swipe, and press Back/Home remotely."
+                            "Turn on 'Screen Control Remote Touch' in Android Accessibility Settings to let Phone 1 tap, swipe, and press Back/Home remotely."
                         },
                         style = MaterialTheme.typography.bodyMedium,
                         color = MaterialTheme.colorScheme.onSurfaceVariant
@@ -421,7 +479,10 @@ fun HostShareScreen(
                             style = MaterialTheme.typography.displaySmall,
                             fontWeight = FontWeight.Bold,
                             color = CyanPulse,
-                            modifier = Modifier.padding(vertical = 16.dp, horizontal = 20.dp)
+                            textAlign = TextAlign.Center,
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .padding(vertical = 16.dp, horizontal = 20.dp)
                         )
                     }
                     Row(
@@ -468,30 +529,45 @@ fun HostShareScreen(
                         .fillMaxWidth()
                         .border(1.dp, CyanPulse.copy(alpha = 0.4f), MaterialTheme.shapes.medium)
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column {
                             Text(
                                 text = record.controllerDeviceName,
                                 style = MaterialTheme.typography.titleMedium
                             )
                             Text(
-                                text = "Claimed code ${record.id}",
+                                text = "Claimed pairing code ${record.id}",
                                 style = MaterialTheme.typography.labelSmall,
                                 color = MaterialTheme.colorScheme.onSurfaceVariant
                             )
                         }
-                        Button(
-                            onClick = { onApprovePairing(record) },
-                            enabled = !isBusy,
-                            modifier = Modifier
-                                .height(48.dp)
-                                .testTag("approve_pairing_${record.id}")
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
-                            Text("Grant Trust")
+                            OutlinedButton(
+                                onClick = { onDismissPairing(record) },
+                                enabled = !isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("dismiss_pairing_${record.id}")
+                            ) {
+                                Text("Dismiss")
+                            }
+                            Button(
+                                onClick = { onApprovePairing(record) },
+                                enabled = !isBusy,
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                                    .testTag("approve_pairing_${record.id}")
+                            ) {
+                                Text("Grant Trust")
+                            }
                         }
                     }
                 }
@@ -513,18 +589,34 @@ fun HostShareScreen(
                         .fillMaxWidth()
                         .border(1.dp, AmberTrust.copy(alpha = 0.5f), MaterialTheme.shapes.medium)
                 ) {
-                    Row(
+                    Column(
                         modifier = Modifier.padding(14.dp),
-                        verticalAlignment = Alignment.CenterVertically,
-                        horizontalArrangement = Arrangement.SpaceBetween
+                        verticalArrangement = Arrangement.spacedBy(10.dp)
                     ) {
-                        Column(modifier = Modifier.weight(1f)) {
+                        Column {
                             Text(session.controllerDeviceName, style = MaterialTheme.typography.titleMedium)
                             Text("Wants to view & control this device", style = MaterialTheme.typography.bodyMedium)
                         }
-                        Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { onEndSession(session.id) }) { Text("Deny") }
-                            Button(onClick = { onApproveSession(session.id) }) { Text("Allow") }
+                        Row(
+                            modifier = Modifier.fillMaxWidth(),
+                            horizontalArrangement = Arrangement.spacedBy(8.dp)
+                        ) {
+                            OutlinedButton(
+                                onClick = { onEndSession(session.id) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Text("Deny")
+                            }
+                            Button(
+                                onClick = { onApproveSession(session.id) },
+                                modifier = Modifier
+                                    .weight(1f)
+                                    .height(48.dp)
+                            ) {
+                                Text("Allow")
+                            }
                         }
                     }
                 }

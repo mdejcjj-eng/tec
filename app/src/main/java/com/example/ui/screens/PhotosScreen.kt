@@ -20,6 +20,7 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.systemBarsPadding
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.lazy.grid.GridCells
 import androidx.compose.foundation.lazy.grid.GridItemSpan
@@ -76,6 +77,7 @@ fun PhotosScreen(
     photosState: UiState<List<SharedPhoto>>,
     isBusy: Boolean,
     onSharePhotoBase64: (String, String) -> Unit,
+    onPhotoError: (String) -> Unit,
     onCaptureRemoteSnapshot: () -> Unit
 ) {
     val context = LocalContext.current
@@ -92,13 +94,14 @@ fun PhotosScreen(
                 }
                 if (encoded != null) {
                     onSharePhotoBase64("Gallery Photo", encoded)
+                } else {
+                    onPhotoError("Could not process selected photo")
                 }
             }
         }
     }
 
-    if (inspectedPhoto != null) {
-        val currentPhoto = inspectedPhoto!!
+    inspectedPhoto?.let { currentPhoto ->
         val fullBitmap by produceState<Bitmap?>(initialValue = null, currentPhoto.imageBase64) {
             value = withContext(Dispatchers.Default) {
                 ImageCodec.decodeBase64ToBitmap(currentPhoto.imageBase64)
@@ -109,7 +112,10 @@ fun PhotosScreen(
             properties = DialogProperties(usePlatformDefaultWidth = false)
         ) {
             Surface(
-                modifier = Modifier.fillMaxSize(),
+                modifier = Modifier
+                    .fillMaxSize()
+                    .background(ObsidianBg)
+                    .systemBarsPadding(),
                 color = ObsidianBg
             ) {
                 Column(modifier = Modifier.fillMaxSize().padding(16.dp)) {
@@ -134,9 +140,10 @@ fun PhotosScreen(
                         modifier = Modifier.weight(1f).fillMaxWidth(),
                         contentAlignment = Alignment.Center
                     ) {
-                        if (fullBitmap != null) {
+                        val safeFullBitmap = fullBitmap?.takeIf { !it.isRecycled }
+                        if (safeFullBitmap != null) {
                             Image(
-                                bitmap = fullBitmap!!.asImageBitmap(),
+                                bitmap = safeFullBitmap.asImageBitmap(),
                                 contentDescription = currentPhoto.title,
                                 modifier = Modifier.fillMaxSize(),
                                 contentScale = ContentScale.Fit
@@ -185,9 +192,13 @@ fun PhotosScreen(
                     ) {
                         Button(
                             onClick = {
-                                photoPickerLauncher.launch(
-                                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
-                                )
+                                try {
+                                    photoPickerLauncher.launch(
+                                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageOnly)
+                                    )
+                                } catch (_: Exception) {
+                                    onPhotoError("Photo picker is unavailable on this device")
+                                }
                             },
                             enabled = activeSession != null && !isBusy,
                             modifier = Modifier
@@ -297,9 +308,10 @@ private fun SharedPhotoGridCard(
                     .background(ObsidianBg),
                 contentAlignment = Alignment.Center
             ) {
-                if (thumb != null) {
+                val safeThumb = thumb?.takeIf { !it.isRecycled }
+                if (safeThumb != null) {
                     Image(
-                        bitmap = thumb!!.asImageBitmap(),
+                        bitmap = safeThumb.asImageBitmap(),
                         contentDescription = photo.title,
                         modifier = Modifier.fillMaxSize(),
                         contentScale = ContentScale.Crop

@@ -13,7 +13,9 @@ import com.example.data.CommandType
 import com.example.data.DevicePreferences
 import com.example.data.LinkMirrorRepository
 import com.example.data.RemoteCommand
+import com.example.data.SessionStatus
 import com.google.firebase.Firebase
+import com.google.firebase.auth.FirebaseAuth
 import com.google.firebase.auth.auth
 import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
@@ -31,29 +33,58 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
     private lateinit var preferences: DevicePreferences
     private var sessionObserverJob: Job? = null
     private var commandObserverJob: Job? = null
-    private val processedIds = HashSet<String>()
+    private val processedIds = LinkedHashSet<String>()
+    private val processedQueue = ArrayDeque<String>()
+    private var currentCommandSessionId: String? = null
+
+    private val authListener = FirebaseAuth.AuthStateListener { auth ->
+        val uid = auth.currentUser?.uid
+        if (uid.isNullOrBlank()) {
+            currentCommandSessionId = null
+            sessionObserverJob?.cancel()
+            commandObserverJob?.cancel()
+        } else {
+            observeActiveSessionCommands(uid)
+        }
+    }
 
     override fun onServiceConnected() {
         super.onServiceConnected()
         repository = LinkMirrorRepository(applicationContext)
         preferences = DevicePreferences(applicationContext)
         ScreenCaptureBus.setAccessibilityConnected(true)
-        observeActiveSessionCommands()
+        try {
+            Firebase.auth.addAuthStateListener(authListener)
+            Firebase.auth.currentUser?.uid?.let { observeActiveSessionCommands(it) }
+        } catch (e: Exception) {
+            Log.w(TAG, "Auth setup skipped: ${e.message}")
+        }
         Log.i(TAG, "LinkMirrorAccessibilityService connected")
     }
 
-    private fun observeActiveSessionCommands() {
+    private fun observeActiveSessionCommands(uid: String) {
         sessionObserverJob?.cancel()
         sessionObserverJob = scope.launch {
-            ScreenCaptureBus.telemetry.collectLatest { state ->
-                val sessionId = state.activeHostSessionId
-                val uid = Firebase.auth.currentUser?.uid
-                if (sessionId.isNullOrBlank() || uid.isNullOrBlank()) {
-                    commandObserverJob?.cancel()
-                    return@collectLatest
+            val cfg = preferences.getOrInitConfig(uid)
+            repository.observeSessions(uid)
+                .catch { e -> Log.w(TAG, "Session observer error: ${e.message}") }
+                .collectLatest { sessions ->
+                    val hostSession = sessions.firstOrNull { s ->
+                        s.hostUid == uid &&
+                            s.hostDeviceId == cfg.deviceId &&
+                            (s.status == SessionStatus.ACTIVE.name ||
+                                (cfg.alwaysAllowControl && s.status == SessionStatus.REQUESTED.name))
+                    }
+                    val targetId = hostSession?.id
+                    if (targetId != currentCommandSessionId) {
+                        currentCommandSessionId = targetId
+                        if (targetId.isNullOrBlank()) {
+                            commandObserverJob?.cancel()
+                        } else {
+                            startListeningToCommands(targetId, uid)
+                        }
+                    }
                 }
-                startListeningToCommands(sessionId, uid)
-            }
         }
     }
 
@@ -63,15 +94,21 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
             repository.observeCommands(sessionId, uid)
                 .catch { e -> Log.w(TAG, "Command stream error: ${e.message}") }
                 .collectLatest { commands ->
+                    val nowMs = System.currentTimeMillis()
                     commands.filter {
-                        it.status == CommandStatus.PENDING.name &&
+                        val createdMs = it.createdAt?.toDate()?.time
+                        val isFresh = createdMs == null || (nowMs - createdMs) <= 120_000L
+                        isFresh &&
+                            it.status == CommandStatus.PENDING.name &&
                             it.type != CommandType.CAPTURE_SNAPSHOT.name &&
                             it.type != CommandType.WAKE_STREAM.name &&
                             !processedIds.contains(it.id)
                     }.forEach { cmd ->
                         processedIds.add(cmd.id)
-                        if (processedIds.size > 500) {
-                            processedIds.clear()
+                        processedQueue.addLast(cmd.id)
+                        if (processedQueue.size > 500) {
+                            val oldest = processedQueue.removeFirst()
+                            processedIds.remove(oldest)
                         }
                         executeRemoteCommand(sessionId, cmd)
                     }
@@ -81,17 +118,19 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
 
     private fun executeRemoteCommand(sessionId: String, cmd: RemoteCommand) {
         val type = CommandType.fromRaw(cmd.type)
-        val (w, h) = getDisplayPixelSize()
+        val (rawW, rawH) = getDisplayPixelSize()
+        val w = rawW.coerceAtLeast(100)
+        val h = rawH.coerceAtLeast(100)
         val x = (cmd.normX.coerceIn(0.02, 0.98) * w).toFloat()
         val y = (cmd.normY.coerceIn(0.02, 0.98) * h).toFloat()
         val endX = (cmd.endNormX.coerceIn(0.02, 0.98) * w).toFloat()
         val endY = (cmd.endNormY.coerceIn(0.02, 0.98) * h).toFloat()
 
         when (type) {
-            CommandType.BACK -> markResult(sessionId, cmd.id, performGlobalAction(GLOBAL_ACTION_BACK), type.name)
-            CommandType.HOME -> markResult(sessionId, cmd.id, performGlobalAction(GLOBAL_ACTION_HOME), type.name)
-            CommandType.RECENTS -> markResult(sessionId, cmd.id, performGlobalAction(GLOBAL_ACTION_RECENTS), type.name)
-            CommandType.NOTIFICATIONS -> markResult(sessionId, cmd.id, performGlobalAction(GLOBAL_ACTION_NOTIFICATIONS), type.name)
+            CommandType.BACK -> safePerformGlobalAction(sessionId, cmd.id, GLOBAL_ACTION_BACK, type.name)
+            CommandType.HOME -> safePerformGlobalAction(sessionId, cmd.id, GLOBAL_ACTION_HOME, type.name)
+            CommandType.RECENTS -> safePerformGlobalAction(sessionId, cmd.id, GLOBAL_ACTION_RECENTS, type.name)
+            CommandType.NOTIFICATIONS -> safePerformGlobalAction(sessionId, cmd.id, GLOBAL_ACTION_NOTIFICATIONS, type.name)
             CommandType.TAP -> dispatchSingleStroke(sessionId, cmd.id, x, y, x, y, 60L, type.name)
             CommandType.LONG_PRESS -> dispatchSingleStroke(sessionId, cmd.id, x, y, x, y, 650L, type.name)
             CommandType.DOUBLE_TAP -> dispatchDoubleTap(sessionId, cmd.id, x, y)
@@ -106,6 +145,16 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
         }
     }
 
+    private fun safePerformGlobalAction(sessionId: String, commandId: String, action: Int, label: String) {
+        val ok = try {
+            performGlobalAction(action)
+        } catch (e: Exception) {
+            Log.w(TAG, "performGlobalAction failed: ${e.message}")
+            false
+        }
+        markResult(sessionId, commandId, ok, label)
+    }
+
     private fun dispatchSingleStroke(
         sessionId: String,
         commandId: String,
@@ -116,43 +165,54 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
         durationMs: Long,
         label: String
     ) {
-        val path = Path().apply {
-            moveTo(startX, startY)
-            if (startX != endX || startY != endY) {
-                lineTo(endX, endY)
+        try {
+            val path = Path().apply {
+                moveTo(startX, startY)
+                if (startX != endX || startY != endY) {
+                    lineTo(endX, endY)
+                }
             }
-        }
-        val stroke = GestureDescription.StrokeDescription(path, 0L, durationMs)
-        val gesture = GestureDescription.Builder().addStroke(stroke).build()
-        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                markResult(sessionId, commandId, true, label)
-            }
+            val safeDuration = durationMs.coerceIn(10L, 60_000L)
+            val stroke = GestureDescription.StrokeDescription(path, 0L, safeDuration)
+            val gesture = GestureDescription.Builder().addStroke(stroke).build()
+            val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    markResult(sessionId, commandId, true, label)
+                }
 
-            override fun onCancelled(gestureDescription: GestureDescription?) {
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    markResult(sessionId, commandId, false, label)
+                }
+            }, null)
+            if (!accepted) {
                 markResult(sessionId, commandId, false, label)
             }
-        }, null)
-        if (!accepted) {
+        } catch (e: Exception) {
+            Log.w(TAG, "dispatchSingleStroke failed: ${e.message}")
             markResult(sessionId, commandId, false, label)
         }
     }
 
     private fun dispatchDoubleTap(sessionId: String, commandId: String, x: Float, y: Float) {
-        val path = Path().apply { moveTo(x, y) }
-        val first = GestureDescription.StrokeDescription(path, 0L, 50L)
-        val second = GestureDescription.StrokeDescription(path, 110L, 50L)
-        val gesture = GestureDescription.Builder().addStroke(first).addStroke(second).build()
-        val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
-            override fun onCompleted(gestureDescription: GestureDescription?) {
-                markResult(sessionId, commandId, true, "DOUBLE_TAP")
-            }
+        try {
+            val path = Path().apply { moveTo(x, y) }
+            val first = GestureDescription.StrokeDescription(path, 0L, 50L)
+            val second = GestureDescription.StrokeDescription(path, 110L, 50L)
+            val gesture = GestureDescription.Builder().addStroke(first).addStroke(second).build()
+            val accepted = dispatchGesture(gesture, object : GestureResultCallback() {
+                override fun onCompleted(gestureDescription: GestureDescription?) {
+                    markResult(sessionId, commandId, true, "DOUBLE_TAP")
+                }
 
-            override fun onCancelled(gestureDescription: GestureDescription?) {
+                override fun onCancelled(gestureDescription: GestureDescription?) {
+                    markResult(sessionId, commandId, false, "DOUBLE_TAP")
+                }
+            }, null)
+            if (!accepted) {
                 markResult(sessionId, commandId, false, "DOUBLE_TAP")
             }
-        }, null)
-        if (!accepted) {
+        } catch (e: Exception) {
+            Log.w(TAG, "dispatchDoubleTap failed: ${e.message}")
             markResult(sessionId, commandId, false, "DOUBLE_TAP")
         }
     }
@@ -171,11 +231,18 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
     }
 
     private fun getDisplayPixelSize(): Pair<Int, Int> {
-        val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
-        return if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
-            val b = wm.maximumWindowMetrics.bounds
-            b.width() to b.height()
-        } else {
+        return try {
+            val wm = getSystemService(Context.WINDOW_SERVICE) as WindowManager
+            if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.R) {
+                val b = wm.maximumWindowMetrics.bounds
+                b.width() to b.height()
+            } else {
+                val dm = android.util.DisplayMetrics()
+                @Suppress("DEPRECATION")
+                wm.defaultDisplay.getRealMetrics(dm)
+                dm.widthPixels to dm.heightPixels
+            }
+        } catch (_: Exception) {
             val dm = resources.displayMetrics
             dm.widthPixels to dm.heightPixels
         }
@@ -190,6 +257,10 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
     }
 
     override fun onDestroy() {
+        try {
+            Firebase.auth.removeAuthStateListener(authListener)
+        } catch (_: Exception) {
+        }
         ScreenCaptureBus.setAccessibilityConnected(false)
         sessionObserverJob?.cancel()
         commandObserverJob?.cancel()

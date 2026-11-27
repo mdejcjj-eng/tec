@@ -63,7 +63,7 @@ service cloud.firestore {
              data.hostDeviceName is string && data.hostDeviceName.size() >= 1 && data.hostDeviceName.size() <= 60 &&
              data.controllerUid is string && data.controllerUid.size() <= 128 &&
              data.controllerDeviceName is string && data.controllerDeviceName.size() <= 60 &&
-             data.status in ['OPEN', 'CLAIMED', 'REVOKED'] &&
+             data.status in ['OPEN', 'CLAIMED', 'APPROVED', 'REVOKED'] &&
              data.alwaysAllow is bool &&
              data.createdAt is timestamp && data.createdAt <= request.time &&
              data.updatedAt is timestamp && data.updatedAt <= request.time;
