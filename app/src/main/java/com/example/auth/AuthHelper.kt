@@ -27,9 +27,10 @@ import kotlinx.coroutines.withContext
 private fun resolveWebClientId(context: Context): String? {
     return try {
         val resId = context.resources.getIdentifier("default_web_client_id", "string", context.packageName)
-        if (resId == 0) null else context.getString(resId).takeIf { it.isNotBlank() }
+        val fromResources = if (resId == 0) null else context.getString(resId).takeIf { it.isNotBlank() }
+        fromResources ?: FirebaseBootstrap.getSavedWebClientId(context)
     } catch (_: Exception) {
-        null
+        FirebaseBootstrap.getSavedWebClientId(context)
     }
 }
 

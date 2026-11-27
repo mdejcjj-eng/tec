@@ -117,6 +117,7 @@ class ScreenShareService : Service() {
 
     override fun onCreate() {
         super.onCreate()
+        com.example.auth.FirebaseBootstrap.ensureInitialized(applicationContext)
         repository = LinkMirrorRepository(applicationContext)
         preferences = DevicePreferences(applicationContext)
         createNotificationChannel()

@@ -50,6 +50,7 @@ class LinkMirrorAccessibilityService : AccessibilityService() {
 
     override fun onServiceConnected() {
         super.onServiceConnected()
+        com.example.auth.FirebaseBootstrap.ensureInitialized(applicationContext)
         repository = LinkMirrorRepository(applicationContext)
         preferences = DevicePreferences(applicationContext)
         ScreenCaptureBus.setAccessibilityConnected(true)
