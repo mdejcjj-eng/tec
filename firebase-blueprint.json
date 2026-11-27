@@ -1,0 +1,373 @@
+{
+  "entities": {
+    "DeviceEntity": {
+      "title": "DeviceEntity",
+      "description": "Registered Android device capable of acting as screen share host, remote controller, or dual-role peer.",
+      "type": "object",
+      "properties": {
+        "ownerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the device owner."
+        },
+        "deviceName": {
+          "type": "string",
+          "description": "Human-readable model or custom name of the device."
+        },
+        "pairingCode": {
+          "type": "string",
+          "description": "6-digit pairing code currently associated with this device."
+        },
+        "roleMode": {
+          "type": "string",
+          "enum": ["DUAL", "CONTROLLER", "HOST"],
+          "description": "Active operational role mode of the device."
+        },
+        "alwaysAllowControl": {
+          "type": "boolean",
+          "description": "Whether trusted controllers can connect anytime without manual per-session approval."
+        },
+        "screenShareActive": {
+          "type": "boolean",
+          "description": "Whether the MediaProjection foreground service is currently active."
+        },
+        "accessibilityActive": {
+          "type": "boolean",
+          "description": "Whether the LinkMirror AccessibilityService is enabled for remote touch control."
+        },
+        "trustedUids": {
+          "type": "array",
+          "description": "Bounded list of Firebase Auth UIDs permitted to initiate remote sessions with this device."
+        },
+        "screenWidth": {
+          "type": "integer",
+          "description": "Device screen width in pixels."
+        },
+        "screenHeight": {
+          "type": "integer",
+          "description": "Device screen height in pixels."
+        },
+        "lastSeenAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last device heartbeat (FieldValue.serverTimestamp())."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when device was registered (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp when device was last updated (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "ownerUid",
+        "deviceName",
+        "pairingCode",
+        "roleMode",
+        "alwaysAllowControl",
+        "screenShareActive",
+        "accessibilityActive",
+        "trustedUids",
+        "screenWidth",
+        "screenHeight",
+        "lastSeenAt",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "PairingRecord": {
+      "title": "PairingRecord",
+      "description": "Short-lived or persistent 6-digit pairing invitation linking a controller account to a host device.",
+      "type": "object",
+      "properties": {
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the host device owner."
+        },
+        "hostDeviceId": {
+          "type": "string",
+          "description": "Document ID of the host device."
+        },
+        "hostDeviceName": {
+          "type": "string",
+          "description": "Display name of the host device."
+        },
+        "controllerUid": {
+          "type": "string",
+          "description": "UID of the controller user who claimed the code, or empty while OPEN."
+        },
+        "controllerDeviceName": {
+          "type": "string",
+          "description": "Device name of the claiming controller, or empty while OPEN."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["OPEN", "CLAIMED", "REVOKED"],
+          "description": "Current pairing claim status."
+        },
+        "alwaysAllow": {
+          "type": "boolean",
+          "description": "Whether the host grants always-allow trusted access upon pairing."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "hostUid",
+        "hostDeviceId",
+        "hostDeviceName",
+        "controllerUid",
+        "controllerDeviceName",
+        "status",
+        "alwaysAllow",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RemoteSession": {
+      "title": "RemoteSession",
+      "description": "Real-time screen sharing and remote control session between two devices.",
+      "type": "object",
+      "properties": {
+        "hostUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the host device owner."
+        },
+        "hostDeviceId": {
+          "type": "string",
+          "description": "Document ID of the host device."
+        },
+        "hostDeviceName": {
+          "type": "string",
+          "description": "Display name of the host device."
+        },
+        "controllerUid": {
+          "type": "string",
+          "description": "Firebase Auth UID of the controller."
+        },
+        "controllerDeviceId": {
+          "type": "string",
+          "description": "Document ID of the controller device."
+        },
+        "controllerDeviceName": {
+          "type": "string",
+          "description": "Display name of the controller device."
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Bounded list of participant UIDs (1 or 2 entries) for session isolation."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["REQUESTED", "ACTIVE", "PAUSED", "ENDED"],
+          "description": "Lifecycle status of the remote session."
+        },
+        "alwaysAllow": {
+          "type": "boolean",
+          "description": "Whether anytime trusted access is authorized for this session."
+        },
+        "remoteControlEnabled": {
+          "type": "boolean",
+          "description": "Whether remote touch and gesture dispatch is enabled on the host."
+        },
+        "latestFrameBase64": {
+          "type": "string",
+          "description": "Latest compressed JPEG screen frame encoded in Base64."
+        },
+        "frameSeq": {
+          "type": "integer",
+          "description": "Monotonically increasing frame sequence number."
+        },
+        "frameWidth": {
+          "type": "integer",
+          "description": "Width of the streamed screen frame in pixels."
+        },
+        "frameHeight": {
+          "type": "integer",
+          "description": "Height of the streamed screen frame in pixels."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of session creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of last frame or status update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "hostUid",
+        "hostDeviceId",
+        "hostDeviceName",
+        "controllerUid",
+        "controllerDeviceId",
+        "controllerDeviceName",
+        "participantUids",
+        "status",
+        "alwaysAllow",
+        "remoteControlEnabled",
+        "latestFrameBase64",
+        "frameSeq",
+        "frameWidth",
+        "frameHeight",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "RemoteCommand": {
+      "title": "RemoteCommand",
+      "description": "Remote touch gesture or global navigation command dispatched from controller to host AccessibilityService.",
+      "type": "object",
+      "properties": {
+        "senderUid": {
+          "type": "string",
+          "description": "UID of the controller that issued the command."
+        },
+        "hostUid": {
+          "type": "string",
+          "description": "UID of the target host device."
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Denormalized participant UIDs matching parent session."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["TAP", "DOUBLE_TAP", "LONG_PRESS", "SWIPE", "BACK", "HOME", "RECENTS", "NOTIFICATIONS", "SCROLL_UP", "SCROLL_DOWN", "WAKE_STREAM", "CAPTURE_SNAPSHOT"],
+          "description": "Remote control action type."
+        },
+        "normX": {
+          "type": "number",
+          "description": "Normalized horizontal start coordinate (0.0 to 1.0)."
+        },
+        "normY": {
+          "type": "number",
+          "description": "Normalized vertical start coordinate (0.0 to 1.0)."
+        },
+        "endNormX": {
+          "type": "number",
+          "description": "Normalized horizontal end coordinate for swipes (0.0 to 1.0)."
+        },
+        "endNormY": {
+          "type": "number",
+          "description": "Normalized vertical end coordinate for swipes (0.0 to 1.0)."
+        },
+        "status": {
+          "type": "string",
+          "enum": ["PENDING", "EXECUTED", "FAILED"],
+          "description": "Execution status updated by host AccessibilityService."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of command creation (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of command execution update (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "senderUid",
+        "hostUid",
+        "participantUids",
+        "type",
+        "normX",
+        "normY",
+        "endNormX",
+        "endNormY",
+        "status",
+        "createdAt",
+        "updatedAt"
+      ]
+    },
+    "SharedPhoto": {
+      "title": "SharedPhoto",
+      "description": "Shared gallery photo or captured screen snapshot exchanged between paired devices.",
+      "type": "object",
+      "properties": {
+        "senderUid": {
+          "type": "string",
+          "description": "UID of the sender."
+        },
+        "senderDeviceName": {
+          "type": "string",
+          "description": "Device name of the sender."
+        },
+        "participantUids": {
+          "type": "array",
+          "description": "Denormalized participant UIDs matching parent session."
+        },
+        "title": {
+          "type": "string",
+          "description": "Short caption or filename label."
+        },
+        "source": {
+          "type": "string",
+          "enum": ["SCREEN_SNAPSHOT", "GALLERY_PHOTO"],
+          "description": "Origin of the shared image."
+        },
+        "imageBase64": {
+          "type": "string",
+          "description": "Compressed JPEG image encoded in Base64."
+        },
+        "createdAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of upload (FieldValue.serverTimestamp())."
+        },
+        "updatedAt": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Server timestamp of record (FieldValue.serverTimestamp())."
+        }
+      },
+      "required": [
+        "senderUid",
+        "senderDeviceName",
+        "participantUids",
+        "title",
+        "source",
+        "imageBase64",
+        "createdAt",
+        "updatedAt"
+      ]
+    }
+  },
+  "firestore": {
+    "/devices/{deviceId}": {
+      "schema": { "$ref": "#/entities/DeviceEntity" },
+      "description": "Registered devices owned by or trusted by the signed-in user."
+    },
+    "/pairings/{pairingCode}": {
+      "schema": { "$ref": "#/entities/PairingRecord" },
+      "description": "6-digit pairing codes for cross-account trusted device authorization."
+    },
+    "/sessions/{sessionId}": {
+      "schema": { "$ref": "#/entities/RemoteSession" },
+      "description": "Active and historical screen sharing and remote control sessions."
+    },
+    "/sessions/{sessionId}/commands/{commandId}": {
+      "schema": { "$ref": "#/entities/RemoteCommand" },
+      "description": "Remote gesture and global action command queue for a session."
+    },
+    "/sessions/{sessionId}/sharedPhotos/{photoId}": {
+      "schema": { "$ref": "#/entities/SharedPhoto" },
+      "description": "Photos and screen snapshots shared during a session."
+    }
+  }
+}

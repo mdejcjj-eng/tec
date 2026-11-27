@@ -1,0 +1,335 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // Global safety net: deny all unmatched paths
+    match /{document=**} {
+      allow read, write: if false;
+    }
+
+    // --- GLOBAL HELPERS ---
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function incoming() {
+      return request.resource.data;
+    }
+
+    function existing() {
+      return resource.data;
+    }
+
+    function isValidId(id) {
+      return id is string && id.size() >= 1 && id.size() <= 128 && id.matches('^[a-zA-Z0-9_\\-]+$');
+    }
+
+    function isValidPairingCode(code) {
+      return code is string && code.size() == 6 && code.matches('^[0-9]{6}$');
+    }
+
+    function isValidParticipants(listVal) {
+      return listVal is list &&
+             listVal.size() >= 1 &&
+             listVal.size() <= 2 &&
+             listVal[0] is string &&
+             (listVal.size() == 1 || listVal[1] is string);
+    }
+
+    // --- ENTITY VALIDATION HELPERS ---
+    function isValidDevice(data) {
+      return data.ownerUid is string && data.ownerUid.size() >= 1 && data.ownerUid.size() <= 128 &&
+             data.deviceName is string && data.deviceName.size() >= 1 && data.deviceName.size() <= 60 &&
+             isValidPairingCode(data.pairingCode) &&
+             data.roleMode in ['DUAL', 'CONTROLLER', 'HOST'] &&
+             data.alwaysAllowControl is bool &&
+             data.screenShareActive is bool &&
+             data.accessibilityActive is bool &&
+             data.trustedUids is list &&
+             data.trustedUids.size() >= 1 &&
+             data.trustedUids.size() <= 10 &&
+             data.trustedUids[0] is string &&
+             data.ownerUid in data.trustedUids &&
+             data.screenWidth is int && data.screenWidth >= 100 && data.screenWidth <= 8000 &&
+             data.screenHeight is int && data.screenHeight >= 100 && data.screenHeight <= 8000 &&
+             data.lastSeenAt is timestamp && data.lastSeenAt <= request.time &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidPairing(data) {
+      return data.hostUid is string && data.hostUid.size() >= 1 && data.hostUid.size() <= 128 &&
+             data.hostDeviceId is string && isValidId(data.hostDeviceId) &&
+             data.hostDeviceName is string && data.hostDeviceName.size() >= 1 && data.hostDeviceName.size() <= 60 &&
+             data.controllerUid is string && data.controllerUid.size() <= 128 &&
+             data.controllerDeviceName is string && data.controllerDeviceName.size() <= 60 &&
+             data.status in ['OPEN', 'CLAIMED', 'REVOKED'] &&
+             data.alwaysAllow is bool &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSession(data) {
+      return data.hostUid is string && data.hostUid.size() >= 1 && data.hostUid.size() <= 128 &&
+             data.hostDeviceId is string && isValidId(data.hostDeviceId) &&
+             data.hostDeviceName is string && data.hostDeviceName.size() >= 1 && data.hostDeviceName.size() <= 60 &&
+             data.controllerUid is string && data.controllerUid.size() >= 1 && data.controllerUid.size() <= 128 &&
+             data.controllerDeviceId is string && isValidId(data.controllerDeviceId) &&
+             data.controllerDeviceName is string && data.controllerDeviceName.size() >= 1 && data.controllerDeviceName.size() <= 60 &&
+             isValidParticipants(data.participantUids) &&
+             data.hostUid in data.participantUids &&
+             data.controllerUid in data.participantUids &&
+             data.status in ['REQUESTED', 'ACTIVE', 'PAUSED', 'ENDED'] &&
+             data.alwaysAllow is bool &&
+             data.remoteControlEnabled is bool &&
+             data.latestFrameBase64 is string && data.latestFrameBase64.size() <= 350000 &&
+             data.frameSeq is int && data.frameSeq >= 0 &&
+             data.frameWidth is int && data.frameWidth >= 0 && data.frameWidth <= 8000 &&
+             data.frameHeight is int && data.frameHeight >= 0 && data.frameHeight <= 8000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidCommand(data) {
+      return data.senderUid is string && data.senderUid.size() >= 1 && data.senderUid.size() <= 128 &&
+             data.hostUid is string && data.hostUid.size() >= 1 && data.hostUid.size() <= 128 &&
+             isValidParticipants(data.participantUids) &&
+             data.senderUid in data.participantUids &&
+             data.hostUid in data.participantUids &&
+             data.type in ['TAP', 'DOUBLE_TAP', 'LONG_PRESS', 'SWIPE', 'BACK', 'HOME', 'RECENTS', 'NOTIFICATIONS', 'SCROLL_UP', 'SCROLL_DOWN', 'WAKE_STREAM', 'CAPTURE_SNAPSHOT'] &&
+             data.normX is number && data.normX >= 0.0 && data.normX <= 1.0 &&
+             data.normY is number && data.normY >= 0.0 && data.normY <= 1.0 &&
+             data.endNormX is number && data.endNormX >= 0.0 && data.endNormX <= 1.0 &&
+             data.endNormY is number && data.endNormY >= 0.0 && data.endNormY <= 1.0 &&
+             data.status in ['PENDING', 'EXECUTED', 'FAILED'] &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    function isValidSharedPhoto(data) {
+      return data.senderUid is string && data.senderUid.size() >= 1 && data.senderUid.size() <= 128 &&
+             data.senderDeviceName is string && data.senderDeviceName.size() >= 1 && data.senderDeviceName.size() <= 60 &&
+             isValidParticipants(data.participantUids) &&
+             data.senderUid in data.participantUids &&
+             data.title is string && data.title.size() >= 1 && data.title.size() <= 100 &&
+             data.source in ['SCREEN_SNAPSHOT', 'GALLERY_PHOTO'] &&
+             data.imageBase64 is string && data.imageBase64.size() >= 10 && data.imageBase64.size() <= 400000 &&
+             data.createdAt is timestamp && data.createdAt <= request.time &&
+             data.updatedAt is timestamp && data.updatedAt <= request.time;
+    }
+
+    // --- COLLECTION RULES ---
+
+    match /devices/{deviceId} {
+      allow get: if isSignedIn() && isValidId(deviceId) &&
+                    (existing().ownerUid == request.auth.uid || request.auth.uid in existing().trustedUids);
+
+      allow list: if isSignedIn() &&
+                     (resource.data.ownerUid == request.auth.uid || request.auth.uid in resource.data.trustedUids);
+
+      allow create: if isSignedIn() &&
+                       isValidId(deviceId) &&
+                       incoming().ownerUid == request.auth.uid &&
+                       incoming().keys().hasAll([
+                         'ownerUid', 'deviceName', 'pairingCode', 'roleMode',
+                         'alwaysAllowControl', 'screenShareActive', 'accessibilityActive',
+                         'trustedUids', 'screenWidth', 'screenHeight',
+                         'lastSeenAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'ownerUid', 'deviceName', 'pairingCode', 'roleMode',
+                         'alwaysAllowControl', 'screenShareActive', 'accessibilityActive',
+                         'trustedUids', 'screenWidth', 'screenHeight',
+                         'lastSeenAt', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidDevice(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidId(deviceId) &&
+                       isValidDevice(incoming()) &&
+                       existing().ownerUid == request.auth.uid &&
+                       incoming().ownerUid == existing().ownerUid &&
+                       incoming().createdAt == existing().createdAt &&
+                       incoming().diff(existing()).affectedKeys().hasOnly([
+                         'deviceName', 'pairingCode', 'roleMode', 'alwaysAllowControl',
+                         'screenShareActive', 'accessibilityActive', 'trustedUids',
+                         'screenWidth', 'screenHeight', 'lastSeenAt', 'updatedAt'
+                       ]);
+
+      allow delete: if isSignedIn() && isValidId(deviceId) && existing().ownerUid == request.auth.uid;
+    }
+
+    match /pairings/{pairingCode} {
+      allow get: if isSignedIn() && isValidPairingCode(pairingCode);
+
+      allow list: if isSignedIn() && resource.data.hostUid == request.auth.uid;
+
+      allow create: if isSignedIn() &&
+                       isValidPairingCode(pairingCode) &&
+                       incoming().hostUid == request.auth.uid &&
+                       incoming().status == 'OPEN' &&
+                       incoming().controllerUid == '' &&
+                       incoming().controllerDeviceName == '' &&
+                       incoming().keys().hasAll([
+                         'hostUid', 'hostDeviceId', 'hostDeviceName',
+                         'controllerUid', 'controllerDeviceName', 'status',
+                         'alwaysAllow', 'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'hostUid', 'hostDeviceId', 'hostDeviceName',
+                         'controllerUid', 'controllerDeviceName', 'status',
+                         'alwaysAllow', 'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidPairing(incoming());
+
+      allow update: if isSignedIn() &&
+                       isValidPairingCode(pairingCode) &&
+                       isValidPairing(incoming()) &&
+                       incoming().hostUid == existing().hostUid &&
+                       incoming().hostDeviceId == existing().hostDeviceId &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         // Action 1: Host updates status or alwaysAllow
+                         (existing().hostUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'alwaysAllow', 'updatedAt'])) ||
+                         // Action 2: Controller claims an OPEN pairing code
+                         (existing().status == 'OPEN' &&
+                          incoming().status == 'CLAIMED' &&
+                          incoming().controllerUid == request.auth.uid &&
+                          incoming().controllerDeviceName.size() >= 1 &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'controllerUid', 'controllerDeviceName', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidPairingCode(pairingCode) && existing().hostUid == request.auth.uid;
+    }
+
+    match /sessions/{sessionId} {
+      allow get: if isSignedIn() && isValidId(sessionId) && request.auth.uid in existing().participantUids;
+
+      allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+
+      allow create: if isSignedIn() &&
+                       isValidId(sessionId) &&
+                       request.auth.uid in incoming().participantUids &&
+                       (incoming().hostUid == request.auth.uid || incoming().controllerUid == request.auth.uid) &&
+                       incoming().keys().hasAll([
+                         'hostUid', 'hostDeviceId', 'hostDeviceName',
+                         'controllerUid', 'controllerDeviceId', 'controllerDeviceName',
+                         'participantUids', 'status', 'alwaysAllow', 'remoteControlEnabled',
+                         'latestFrameBase64', 'frameSeq', 'frameWidth', 'frameHeight',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       incoming().keys().hasOnly([
+                         'hostUid', 'hostDeviceId', 'hostDeviceName',
+                         'controllerUid', 'controllerDeviceId', 'controllerDeviceName',
+                         'participantUids', 'status', 'alwaysAllow', 'remoteControlEnabled',
+                         'latestFrameBase64', 'frameSeq', 'frameWidth', 'frameHeight',
+                         'createdAt', 'updatedAt'
+                       ]) &&
+                       isValidSession(incoming()) &&
+                       exists(/databases/$(database)/documents/devices/$(incoming().hostDeviceId)) &&
+                       request.auth.uid in get(/databases/$(database)/documents/devices/$(incoming().hostDeviceId)).data.trustedUids &&
+                       get(/databases/$(database)/documents/devices/$(incoming().hostDeviceId)).data.ownerUid == incoming().hostUid;
+
+      allow update: if isSignedIn() &&
+                       isValidId(sessionId) &&
+                       isValidSession(incoming()) &&
+                       request.auth.uid in existing().participantUids &&
+                       incoming().hostUid == existing().hostUid &&
+                       incoming().hostDeviceId == existing().hostDeviceId &&
+                       incoming().controllerUid == existing().controllerUid &&
+                       incoming().controllerDeviceId == existing().controllerDeviceId &&
+                       incoming().participantUids == existing().participantUids &&
+                       incoming().createdAt == existing().createdAt &&
+                       (
+                         // Action 1: Host streams screen frames or updates control/status (allow host to reactivate too)
+                         (existing().hostUid == request.auth.uid &&
+                          incoming().diff(existing()).affectedKeys().hasOnly([
+                            'status', 'alwaysAllow', 'remoteControlEnabled',
+                            'latestFrameBase64', 'frameSeq', 'frameWidth', 'frameHeight', 'updatedAt'
+                          ])) ||
+                         // Action 2: Controller requests/pauses/resumes/ends session
+                         (existing().controllerUid == request.auth.uid &&
+                          existing().status != 'ENDED' &&
+                          incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']))
+                       );
+
+      allow delete: if isSignedIn() && isValidId(sessionId) && existing().hostUid == request.auth.uid;
+
+      match /commands/{commandId} {
+        allow get: if isSignedIn() && isValidId(sessionId) && isValidId(commandId) &&
+                      request.auth.uid in existing().participantUids;
+
+        allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(sessionId) &&
+                         isValidId(commandId) &&
+                         incoming().senderUid == request.auth.uid &&
+                         request.auth.uid in incoming().participantUids &&
+                         incoming().status == 'PENDING' &&
+                         incoming().keys().hasAll([
+                           'senderUid', 'hostUid', 'participantUids', 'type',
+                           'normX', 'normY', 'endNormX', 'endNormY', 'status',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'senderUid', 'hostUid', 'participantUids', 'type',
+                           'normX', 'normY', 'endNormX', 'endNormY', 'status',
+                           'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidCommand(incoming()) &&
+                         exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
+                         request.auth.uid in get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids &&
+                         incoming().participantUids == get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids &&
+                         incoming().hostUid == get(/databases/$(database)/documents/sessions/$(sessionId)).data.hostUid;
+
+        allow update: if isSignedIn() &&
+                         isValidId(sessionId) &&
+                         isValidId(commandId) &&
+                         isValidCommand(incoming()) &&
+                         existing().hostUid == request.auth.uid &&
+                         existing().status == 'PENDING' &&
+                         incoming().senderUid == existing().senderUid &&
+                         incoming().hostUid == existing().hostUid &&
+                         incoming().participantUids == existing().participantUids &&
+                         incoming().type == existing().type &&
+                         incoming().createdAt == existing().createdAt &&
+                         incoming().diff(existing()).affectedKeys().hasOnly(['status', 'updatedAt']);
+
+        allow delete: if isSignedIn() && isValidId(sessionId) && isValidId(commandId) &&
+                         (existing().hostUid == request.auth.uid || existing().senderUid == request.auth.uid);
+      }
+
+      match /sharedPhotos/{photoId} {
+        allow get: if isSignedIn() && isValidId(sessionId) && isValidId(photoId) &&
+                      request.auth.uid in existing().participantUids;
+
+        allow list: if isSignedIn() && request.auth.uid in resource.data.participantUids;
+
+        allow create: if isSignedIn() &&
+                         isValidId(sessionId) &&
+                         isValidId(photoId) &&
+                         incoming().senderUid == request.auth.uid &&
+                         request.auth.uid in incoming().participantUids &&
+                         incoming().keys().hasAll([
+                           'senderUid', 'senderDeviceName', 'participantUids',
+                           'title', 'source', 'imageBase64', 'createdAt', 'updatedAt'
+                         ]) &&
+                         incoming().keys().hasOnly([
+                           'senderUid', 'senderDeviceName', 'participantUids',
+                           'title', 'source', 'imageBase64', 'createdAt', 'updatedAt'
+                         ]) &&
+                         isValidSharedPhoto(incoming()) &&
+                         exists(/databases/$(database)/documents/sessions/$(sessionId)) &&
+                         request.auth.uid in get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids &&
+                         incoming().participantUids == get(/databases/$(database)/documents/sessions/$(sessionId)).data.participantUids;
+
+        allow update: if false;
+
+        allow delete: if isSignedIn() && isValidId(sessionId) && isValidId(photoId) &&
+                         existing().senderUid == request.auth.uid;
+      }
+    }
+  }
+}

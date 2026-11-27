@@ -1,0 +1,15 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Screen Control</string>
+    <string name="accessibility_service_label">Screen Control Remote Touch</string>
+    <string name="accessibility_service_description">Allows your trusted paired device in Screen Control to perform remote taps, swipes, and navigation actions (Back, Home, Recents) when remote control is enabled by you.</string>
+    <string name="notification_channel_screen_share">Live Screen Sharing</string>
+    <string name="notification_title_screen_share">Screen Control Broadcast Active</string>
+    <string name="notification_body_screen_share">Your screen is armed for trusted remote viewing. Tap Stop to end anytime.</string>
+    <string name="action_stop_sharing">Stop Sharing</string>
+    <string name="sign_in_with_google">Sign in with Google</string>
+    <string name="nav_control">Control</string>
+    <string name="nav_host">Share Host</string>
+    <string name="nav_photos">Photos</string>
+    <string name="nav_security">Security</string>
+</resources>

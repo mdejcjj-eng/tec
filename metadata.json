@@ -1,0 +1,8 @@
+{
+  "name": "Remix LinkMirror",
+  "description": "Real-time screen sharing, photo relay, and secure remote control between two trusted Android devices.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
