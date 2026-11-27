@@ -19,10 +19,16 @@ jobs:
           distribution: 'temurin'
           java-version: '21'
 
-      - name: Restore debug signing keystore
+      - name: Restore or generate debug signing keystore
         run: |
-          if [ ! -f debug.keystore ] && [ -f debug.keystore.base64 ]; then
+          if [ ! -f debug.keystore ] && [ -s debug.keystore.base64 ]; then
             base64 -d debug.keystore.base64 > debug.keystore
+          fi
+          if [ ! -s debug.keystore ]; then
+            keytool -genkeypair -v -keystore debug.keystore \
+              -storepass android -alias androiddebugkey -keypass android \
+              -keyalg RSA -keysize 2048 -validity 10000 \
+              -dname "CN=Android Debug,O=Android,C=US"
           fi
 
       - name: Set up Gradle
@@ -31,7 +37,7 @@ jobs:
           gradle-version: '9.3.1'
 
       - name: Build Debug APK
-        run: gradle assembleDebug --no-daemon
+        run: gradle assembleDebug --no-daemon --no-build-cache
 
       - name: Upload APK artifact
         uses: actions/upload-artifact@v4
